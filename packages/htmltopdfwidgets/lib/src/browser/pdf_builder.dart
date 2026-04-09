@@ -45,7 +45,6 @@ class PdfBuilder {
   /// - Block elements containing only inline content (rendered as [pw.RichText]).
   /// - Generic block elements with mixed content (recursively building children).
   Future<List<pw.Widget>> _buildBlock(RenderNode node) async {
-    print('Building block: ${node.tagName} children:${node.children.length}');
     final widgets = <pw.Widget>[];
 
     if (node.display == Display.none) return widgets;
@@ -265,14 +264,16 @@ class PdfBuilder {
     }
 
     // Determine border style
+    final border = node.style.border;
     final borderCollapse = node.style.borderCollapse ?? true;
-    final borderColor = node.style.border?.top.color ?? PdfColors.grey600;
-    final borderWidth = node.style.border?.top.width ?? 0.5;
+    final borderColor = border?.top.color ?? PdfColors.grey600;
+    final borderWidth = border?.top.width ?? 0.5;
 
     // Container prevents spanning. Use Padding/SizedBox for margin.
     // Detect if table is potentially larger than a page to avoid TooManyPageException
     // when using FlexColumnWidth (which makes columns narrower and taller)
     final maxColChars = <int, int>{};
+    final fixedColWidths = <int, double>{};
     for (var child in node.children) {
       final rows = (child.tagName == 'tr' ? [child] : child.children);
       for (var row in rows) {
@@ -288,8 +289,15 @@ class PdfBuilder {
             }
 
             final len = getLength(cell);
-            maxColChars[i] =
-                (maxColChars[i] ?? 0) < len ? len : maxColChars[i]!;
+            final current = maxColChars[i] ?? 0;
+            maxColChars[i] = len > current ? len : current;
+            if (cell.style.width != null) {
+              final w = cell.style.width!;
+              final prev = fixedColWidths[i];
+              if (prev == null || w > prev) {
+                fixedColWidths[i] = w;
+              }
+            }
           }
         }
       }
@@ -310,6 +318,11 @@ class PdfBuilder {
       columnWidths = {};
     } else {
       for (var entry in maxColChars.entries) {
+        final fixedWidth = fixedColWidths[entry.key];
+        if (fixedWidth != null) {
+          columnWidths[entry.key] = pw.FixedColumnWidth(fixedWidth);
+          continue;
+        }
         // Give 3x weight to column with massive content (> 1500 chars)
         final weight = entry.value > 1500 ? 3.0 : 1.0;
         columnWidths[entry.key] = pw.FlexColumnWidth(weight);
@@ -319,12 +332,14 @@ class PdfBuilder {
     return pw.Padding(
       padding: node.style.margin ?? const pw.EdgeInsets.symmetric(vertical: 8),
       child: pw.Table(
-        border: borderCollapse
-            ? pw.TableBorder.all(color: borderColor, width: borderWidth)
-            : pw.TableBorder.symmetric(
-                inside: pw.BorderSide(color: borderColor, width: borderWidth),
-                outside: pw.BorderSide(color: borderColor, width: borderWidth),
-              ),
+        border: border == null
+            ? null
+            : (borderCollapse
+                ? pw.TableBorder.all(color: borderColor, width: borderWidth)
+                : pw.TableBorder.symmetric(
+                    inside: pw.BorderSide(color: borderColor, width: borderWidth),
+                    outside: pw.BorderSide(color: borderColor, width: borderWidth),
+                  )),
         defaultVerticalAlignment: pw.TableCellVerticalAlignment.full,
         columnWidths: columnWidths.isEmpty ? null : columnWidths,
         defaultColumnWidth: const pw.FlexColumnWidth(),
@@ -338,13 +353,18 @@ class PdfBuilder {
     final allCellSpans = <List<pw.InlineSpan>>[];
     final cellStyles = <RenderNode>[];
     final alignments = <pw.Alignment>[];
+    final cellHasImage = <bool>[];
     int maxChunks = 1;
 
     // First pass: collect all content and determine split points
     for (var child in node.children) {
       if (child.tagName == 'td' || child.tagName == 'th') {
+        final hasImage = _containsImage(child);
+        cellHasImage.add(hasImage);
         final spans = <pw.InlineSpan>[];
-        _collectInlineSpans(child, spans);
+        if (!hasImage) {
+          _collectInlineSpans(child, spans);
+        }
         allCellSpans.add(spans);
         cellStyles.add(child);
 
@@ -366,12 +386,14 @@ class PdfBuilder {
 
         // Count total chars to see if we split
         int totalLen = 0;
-        for (var s in spans) {
-          if (s is pw.TextSpan) totalLen += (s.text ?? '').length;
-        }
-        if (totalLen > 2000) {
-          final chunks = (totalLen / 1500).ceil();
-          if (chunks > maxChunks) maxChunks = chunks;
+        if (!hasImage) {
+          for (var s in spans) {
+            if (s is pw.TextSpan) totalLen += (s.text ?? '').length;
+          }
+          if (totalLen > 2000) {
+            final chunks = (totalLen / 1500).ceil();
+            if (chunks > maxChunks) maxChunks = chunks;
+          }
         }
       }
     }
@@ -382,7 +404,9 @@ class PdfBuilder {
       for (int i = 0; i < allCellSpans.length; i++) {
         final child = cellStyles[i];
         final isHeader = child.tagName == 'th' || isHeaderRow;
-        final cellContent = _buildCellRichText(allCellSpans[i], isHeader);
+        final cellContent = cellHasImage[i]
+            ? await _buildCellContentWithImages(child, isHeader)
+            : _buildCellRichText(allCellSpans[i], isHeader);
         cells.add(_wrapCell(child, cellContent, alignments[i], isHeader));
       }
       return [
@@ -409,6 +433,17 @@ class PdfBuilder {
         final isHeader = child.tagName == 'th' || isHeaderRow;
         final chunks = splitCellSpans[cellIdx];
 
+        if (cellHasImage[cellIdx]) {
+          if (chunkIdx == 0) {
+            final cellContent =
+                await _buildCellContentWithImages(child, isHeader);
+            cells.add(_wrapCell(child, cellContent, alignments[cellIdx], isHeader));
+          } else {
+            cells.add(pw.SizedBox());
+          }
+          continue;
+        }
+
         if (chunkIdx < chunks.length) {
           final cellContent = _buildCellRichText(chunks[chunkIdx], isHeader);
           // Only show background/decoration on the first chunk row for headers
@@ -424,6 +459,26 @@ class PdfBuilder {
     }
 
     return tableRows;
+  }
+
+
+  bool _containsImage(RenderNode node) {
+    if (node.tagName == 'img') return true;
+    for (final child in node.children) {
+      if (_containsImage(child)) return true;
+    }
+    return false;
+  }
+
+  Future<pw.Widget> _buildCellContentWithImages(
+      RenderNode node, bool isHeader) async {
+    final widgets = await _buildBlockContent(node);
+    if (widgets.isEmpty) return pw.SizedBox();
+    if (widgets.length == 1) return widgets.first;
+    return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: widgets,
+    );
   }
 
   pw.Widget _wrapCell(RenderNode node, pw.Widget content,
@@ -727,6 +782,26 @@ class PdfBuilder {
   }
 
   Future<List<pw.Widget>> _buildBlockChild(RenderNode node) async {
+    // Special handling for top-level headers to emit PDF outlines/TOC entries.
+    if (node.tagName == 'h1') {
+      final text = _collectText(node).trim();
+      if (text.isEmpty) {
+        return [];
+      }
+
+      return [
+        pw.Header(
+          level: 0,
+          title: text,
+          text: text,
+          textStyle: _mapTextStyle(node.style),
+          decoration: _buildBoxDecoration(node.style),
+          margin: node.style.margin,
+          padding: node.style.padding,
+        ),
+      ];
+    }
+
     // This node is a block element.
     // We need to apply its styles (padding, margin, border, background)
     // and then process its children.
@@ -828,6 +903,10 @@ class PdfBuilder {
   /// VERY conservative - only headers and simple blockquotes
   /// Paragraphs, divs, and other blocks may contain long content that exceeds page height
   bool _isSmallBlock(RenderNode node, List<pw.Widget> children) {
+    if (_hasBlockClassStyle(node)) {
+      return true;
+    }
+
     // Only headers are truly guaranteed to be small
     if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].contains(node.tagName)) {
       return true;
@@ -949,6 +1028,32 @@ class PdfBuilder {
     ];
   }
 
+  String _collectInlineText(RenderNode node) {
+    if (node.text != null) return node.text!;
+    final buffer = StringBuffer();
+    for (final child in node.children) {
+      buffer.write(_collectInlineText(child));
+    }
+    return buffer.toString();
+  }
+
+  bool _hasBlockClassStyle(RenderNode node) {
+    if (tagStyle.blockClassStyles.isEmpty) return false;
+    final classAttr = node.attributes['class'];
+    if (classAttr == null || classAttr.isEmpty) return false;
+    for (final className in classAttr.split(RegExp(r'\s+'))) {
+      if (className.isEmpty) continue;
+      if (tagStyle.blockClassStyles.containsKey(className)) return true;
+    }
+    return false;
+  }
+
+  bool _hasClass(RenderNode node, String className) {
+    final classAttr = node.attributes['class'];
+    if (classAttr == null || classAttr.isEmpty) return false;
+    return classAttr.split(RegExp(r'\s+')).contains(className);
+  }
+
   void _collectInlineSpans(RenderNode node, List<pw.InlineSpan> spans) {
     if (node.display == Display.none) return;
 
@@ -986,6 +1091,89 @@ class PdfBuilder {
         child: _buildCheckbox(node),
         baseline: baseline,
       ));
+      return;
+    }
+
+    if (node.tagName == 'span') {
+      InlineTagStyle? classStyle;
+      if (node.attributes.containsKey('class')) {
+        for (final className in node.attributes['class']!.split(RegExp(r'\s+'))) {
+          if (className.isEmpty) continue;
+          final style = tagStyle.inlineClassStyles[className];
+          if (style != null) {
+            classStyle = style;
+            break;
+          }
+        }
+      }
+
+      if (classStyle != null) {
+        if (spans.isNotEmpty) {
+          final lastSpan = spans.last;
+          if (lastSpan is pw.TextSpan) {
+            final lastText = lastSpan.text ?? '';
+            if (lastText.isNotEmpty && !lastText.endsWith(' ')) {
+              spans.add(const pw.TextSpan(text: ' '));
+            }
+          }
+        }
+
+        final textContent = _collectInlineText(node).replaceAll(RegExp(r'\s+'), ' ');
+
+        if (textContent.isNotEmpty) {
+          final baseStyle = _mapTextStyle(node.style).copyWith(
+            background: null,
+            color: classStyle.textColor ?? _mapTextStyle(node.style).color,
+          );
+          final bgColor = classStyle.backgroundColor ?? node.style.backgroundColor;
+          final borderColor = classStyle.borderColor;
+          final borderWidth = classStyle.borderWidth;
+          final padding = classStyle.padding;
+
+          spans.add(pw.WidgetSpan(
+            baseline: 0,
+            child: pw.Container(
+              padding: pw.EdgeInsets.all(padding),
+              decoration: pw.BoxDecoration(
+                color: bgColor,
+                border: borderColor != null && borderWidth > 0
+                    ? pw.Border.all(color: borderColor, width: borderWidth)
+                    : null,
+              ),
+              child: pw.Text(textContent, style: baseStyle),
+            ),
+          ));
+        }
+        return;
+      }
+    }
+
+    if (node.tagName == 'code' && node.display == Display.inline) {
+      if (spans.isNotEmpty) {
+        final lastSpan = spans.last;
+        if (lastSpan is pw.TextSpan) {
+          final lastText = lastSpan.text ?? '';
+          if (lastText.isNotEmpty && !lastText.endsWith(' ')) {
+            spans.add(const pw.TextSpan(text: ' '));
+          }
+        }
+      }
+
+      var textContent = _collectInlineText(node);
+      textContent = textContent.replaceAll(RegExp(r'\s+'), ' ');
+
+      if (textContent.isNotEmpty) {
+        final baseStyle = _mapTextStyle(node.style).copyWith(background: null);
+        final bgColor =
+            tagStyle.inlineCodeBackgroundColor ?? node.style.backgroundColor;
+        spans.add(pw.TextSpan(
+          text: textContent,
+          style: baseStyle.copyWith(
+            background:
+                bgColor != null ? pw.BoxDecoration(color: bgColor) : null,
+          ),
+        ));
+      }
       return;
     }
 
@@ -1064,6 +1252,9 @@ class PdfBuilder {
     return pw.BoxDecoration(
       color: style.backgroundColor,
       border: style.border,
+      borderRadius: style.borderRadius != null
+          ? pw.BorderRadius.circular(style.borderRadius!)
+          : null,
     );
   }
 

@@ -108,6 +108,18 @@ class HtmlParser {
       computedStyle = computedStyle.merge(ruleStyle);
     }
 
+    // 3.1.1 Apply block class-based styles from tagStyle
+    final classAttr = element.attributes['class'];
+    if (classAttr != null && classAttr.isNotEmpty && tagStyle.blockClassStyles.isNotEmpty) {
+      for (final className in classAttr.split(RegExp(r'\s+'))) {
+        if (className.isEmpty) continue;
+        final classStyle = tagStyle.blockClassStyles[className];
+        if (classStyle != null) {
+          computedStyle = computedStyle.merge(_convertBlockTagStyleToCSSStyle(classStyle));
+        }
+      }
+    }
+
     // 3.2 Map HTML attributes to CSS styles (Legacy compatibility)
     final attributeStyle = _parseAttributesToStyle(element.attributes);
     computedStyle = computedStyle.merge(attributeStyle);
@@ -385,6 +397,28 @@ class HtmlParser {
       default:
         return const CSSStyle();
     }
+  }
+
+  CSSStyle _convertBlockTagStyleToCSSStyle(BlockTagStyle blockStyle) {
+    return CSSStyle(
+      color: blockStyle.textColor,
+      backgroundColor: blockStyle.backgroundColor,
+      fontSize: blockStyle.fontSize,
+      fontWeight: blockStyle.fontWeight,
+      fontStyle: blockStyle.fontStyle,
+      textAlign: blockStyle.textAlign,
+      lineHeight: blockStyle.lineHeight,
+      padding: blockStyle.padding != null
+          ? EdgeInsets.all(blockStyle.padding!)
+          : null,
+      margin: blockStyle.margin != null
+          ? EdgeInsets.all(blockStyle.margin!)
+          : null,
+      border: blockStyle.borderColor != null && blockStyle.borderWidth > 0
+          ? Border.all(color: blockStyle.borderColor!, width: blockStyle.borderWidth)
+          : null,
+      borderRadius: blockStyle.borderRadius,
+    );
   }
 
   /// Converts a [TextStyle] to a [CSSStyle].

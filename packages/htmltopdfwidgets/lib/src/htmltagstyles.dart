@@ -6,6 +6,53 @@ import 'package:htmltopdfwidgets/htmltopdfwidgets.dart';
 /// Return a [Widget] to render as the checkbox.
 typedef CheckboxBuilder = Widget Function(bool isChecked);
 
+class InlineTagStyle {
+  final PdfColor? textColor;
+  final PdfColor? backgroundColor;
+  final PdfColor? borderColor;
+  final double borderWidth;
+  final double padding;
+
+  const InlineTagStyle({
+    this.textColor,
+    this.backgroundColor,
+    this.borderColor,
+    this.borderWidth = 1.0,
+    this.padding = 2.0,
+  });
+}
+
+
+class BlockTagStyle {
+  final PdfColor? textColor;
+  final PdfColor? backgroundColor;
+  final PdfColor? borderColor;
+  final double borderWidth;
+  final double? padding;
+  final double? margin;
+  final double? borderRadius;
+  final FontWeight? fontWeight;
+  final FontStyle? fontStyle;
+  final double? fontSize;
+  final TextAlign? textAlign;
+  final double? lineHeight;
+
+  const BlockTagStyle({
+    this.textColor,
+    this.backgroundColor,
+    this.borderColor,
+    this.borderWidth = 1.0,
+    this.padding,
+    this.margin,
+    this.borderRadius,
+    this.fontWeight,
+    this.fontStyle,
+    this.fontSize,
+    this.textAlign,
+    this.lineHeight,
+  });
+}
+
 //apply custom styles to html stylee
 class HtmlTagStyle {
   //bold  style that will merge with default style
@@ -67,6 +114,28 @@ class HtmlTagStyle {
   final PdfColor codeblockColor;
   // The decoration style that will merge with default style
   final BoxDecoration? codeDecoration;
+  // Inline code background color
+  final PdfColor? inlineCodeBackgroundColor;
+  // Inline code border color
+  final PdfColor? inlineCodeBorderColor;
+  // Inline code border width
+  final double inlineCodeBorderWidth;
+  // Inline code padding
+  final double inlineCodePadding;
+  // Inline class-based styles (applies to span with class)
+  final Map<String, InlineTagStyle> inlineClassStyles;
+  // Block class-based styles (applies to any element with class)
+  final Map<String, BlockTagStyle> blockClassStyles;
+  // Inline button text color
+  final PdfColor? inlineButtonTextColor;
+  // Inline button background color
+  final PdfColor? inlineButtonBackgroundColor;
+  // Inline button border color
+  final PdfColor? inlineButtonBorderColor;
+  // Inline button border width
+  final double inlineButtonBorderWidth;
+  // Inline button padding
+  final double inlineButtonPadding;
 
   /// The height of the divider in a PDF document.
   final double dividerHight;
@@ -133,6 +202,17 @@ class HtmlTagStyle {
     this.codeBlockBackgroundColor = PdfColors.red,
     this.codeblockColor = PdfColors.grey,
     this.codeDecoration,
+    this.inlineCodeBackgroundColor,
+    this.inlineCodeBorderColor,
+    this.inlineCodeBorderWidth = 1.0,
+    this.inlineCodePadding = 2.0,
+    this.inlineClassStyles = const {},
+    this.blockClassStyles = const {},
+    this.inlineButtonTextColor,
+    this.inlineButtonBackgroundColor,
+    this.inlineButtonBorderColor,
+    this.inlineButtonBorderWidth = 1.0,
+    this.inlineButtonPadding = 2.0,
     this.dividerthickness = 1.0,
     this.dividerColor = PdfColors.grey,
     this.useDefaultStyles = true,
