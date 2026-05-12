@@ -715,7 +715,7 @@ class PdfBuilder {
           const pw.EdgeInsets.all(8),
       child: pw.Text(
         text,
-        style: const pw.TextStyle(
+        style: pw.TextStyle(
           fontSize: 10,
           fontFallback: fontFallback,
         ),
