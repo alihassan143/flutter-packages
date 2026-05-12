@@ -717,8 +717,7 @@ class PdfBuilder {
         text,
         style: const pw.TextStyle(
           fontSize: 10,
-
-          // font: // monospace font should be here if available
+          fontFallback: fontFallback,
         ),
       ),
     );
