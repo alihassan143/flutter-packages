@@ -938,8 +938,18 @@ class PdfBuilder {
     final bottomSpace =
         (style.margin?.bottom ?? 0) + (style.padding?.bottom ?? 0);
 
+    // The block is split into [top cap][...children][bottom cap] so it can span
+    // pages, so a radius has to be split too: the caps carry the rounded
+    // corners and the middle sections stay square.
+    final radius = style.borderRadius;
+
+    // A radius on its own paints nothing, so it must not be what causes the
+    // filler strips below. Only a colour or a border justifies them.
+    final paints = decoration != null &&
+        (decoration.color != null || decoration.border != null);
+
     // Add top spacing with background and top border
-    if (topSpace > 0 || decoration != null) {
+    if (topSpace > 0 || paints) {
       result.add(pw.Container(
         height: topSpace > 0 ? topSpace : null,
         padding: topSpace > 0 ? null : const pw.EdgeInsets.only(top: 8),
@@ -948,6 +958,9 @@ class PdfBuilder {
                 color: decoration.color,
                 border: decoration.border?.top != null
                     ? pw.Border(top: decoration.border!.top)
+                    : null,
+                borderRadius: radius != null
+                    ? pw.BorderRadius.vertical(top: pw.Radius.circular(radius))
                     : null,
               )
             : null,
@@ -977,7 +990,7 @@ class PdfBuilder {
     }
 
     // Add bottom spacing with background and bottom border
-    if (bottomSpace > 0 || decoration != null) {
+    if (bottomSpace > 0 || paints) {
       result.add(pw.Container(
         height: bottomSpace > 0 ? bottomSpace : null,
         padding: bottomSpace > 0 ? null : const pw.EdgeInsets.only(bottom: 8),
@@ -986,6 +999,10 @@ class PdfBuilder {
                 color: decoration.color,
                 border: decoration.border?.bottom != null
                     ? pw.Border(bottom: decoration.border!.bottom)
+                    : null,
+                borderRadius: radius != null
+                    ? pw.BorderRadius.vertical(
+                        bottom: pw.Radius.circular(radius))
                     : null,
               )
             : null,
