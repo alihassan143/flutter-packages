@@ -1142,11 +1142,18 @@ class PdfBuilder {
   }
 
   pw.BoxDecoration? _buildBoxDecoration(CSSStyle style) {
-    if (style.backgroundColor == null && style.border == null) return null;
+    if (style.backgroundColor == null &&
+        style.border == null &&
+        style.borderRadius == null) {
+      return null;
+    }
 
     return pw.BoxDecoration(
       color: style.backgroundColor,
       border: style.border,
+      borderRadius: style.borderRadius != null
+          ? pw.BorderRadius.all(pw.Radius.circular(style.borderRadius!))
+          : null,
     );
   }
 
