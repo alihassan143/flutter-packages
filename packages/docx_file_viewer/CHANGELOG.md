@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.4] - 2026-09-13
+
+### Added
+- **`DocxViewConfig.showFootnotes`** (#83, restored per #121): boolean flag (default `true`). Set to `false` to hide the footnotes section at the bottom of the document and disable inline footnote reference taps.
+- **`DocxViewConfig.showEndnotes`** (#83, restored per #121): boolean flag (default `true`). Set to `false` to hide the endnotes section and disable inline endnote reference taps.
+- `copyWith` now supports `showFootnotes` and `showEndnotes` parameters (previously missing).
+- Restored `test/issue_83_notes_config_test.dart` — 10 unit/widget tests covering config defaults, `copyWith` behaviour, and widget generator output.
+
+### Fixed
+- The #83 fix above was implemented once already but was accidentally reverted shortly after landing (see #121) — it is re-applied here, unchanged in behavior.
+
 ## [1.0.3] - 2026-07-26
 
 ### 🐛 Bug Fixes

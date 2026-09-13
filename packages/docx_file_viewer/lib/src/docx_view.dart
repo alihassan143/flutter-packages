@@ -185,10 +185,12 @@ class _DocxViewState extends State<DocxView> {
         theme: widget.config.theme,
         docxTheme: doc.theme,
         searchController: widget.config.enableSearch ? _searchController : null,
-        onFootnoteTap: (id) =>
-            _showNoteContent('Footnote', footnoteMap[id]?.content),
-        onEndnoteTap: (id) =>
-            _showNoteContent('Endnote', endnoteMap[id]?.content),
+        onFootnoteTap: widget.config.showFootnotes
+            ? (id) => _showNoteContent('Footnote', footnoteMap[id]?.content)
+            : null,
+        onEndnoteTap: widget.config.showEndnotes
+            ? (id) => _showNoteContent('Endnote', endnoteMap[id]?.content)
+            : null,
       );
 
       // Generate widgets
