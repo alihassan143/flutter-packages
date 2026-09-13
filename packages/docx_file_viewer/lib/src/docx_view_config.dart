@@ -63,6 +63,16 @@ class DocxViewConfig {
   /// If null, defaults to page width * 1.414 (A4 ratio).
   final double? pageHeight;
 
+  /// Whether to render the footnotes section at the bottom of the document.
+  /// Also controls whether footnote reference marks are tappable.
+  /// Defaults to true.
+  final bool showFootnotes;
+
+  /// Whether to render the endnotes section at the bottom of the document.
+  /// Also controls whether endnote reference marks are tappable.
+  /// Defaults to true.
+  final bool showEndnotes;
+
   const DocxViewConfig({
     this.enableSearch = true,
     this.enableZoom = true,
@@ -80,6 +90,8 @@ class DocxViewConfig {
     this.pageWidth,
     this.pageHeight,
     this.pageMode = DocxPageMode.paged,
+    this.showFootnotes = true,
+    this.showEndnotes = true,
   });
 
   DocxViewConfig copyWith({
@@ -97,6 +109,8 @@ class DocxViewConfig {
     Color? searchHighlightColor,
     Color? currentSearchHighlightColor,
     double? pageWidth,
+    bool? showFootnotes,
+    bool? showEndnotes,
   }) {
     return DocxViewConfig(
       enableSearch: enableSearch ?? this.enableSearch,
@@ -114,6 +128,8 @@ class DocxViewConfig {
       currentSearchHighlightColor:
           currentSearchHighlightColor ?? this.currentSearchHighlightColor,
       pageWidth: pageWidth ?? this.pageWidth,
+      showFootnotes: showFootnotes ?? this.showFootnotes,
+      showEndnotes: showEndnotes ?? this.showEndnotes,
     );
   }
 }
