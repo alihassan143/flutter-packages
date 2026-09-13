@@ -1,3 +1,9 @@
+## 1.3.3
+
+### Changed
+- **Bumped `xml` lower bound to 7.0.1** (#122): was pinned to `^6.6.1`.
+- Dependency constraints rewritten from caret (`^x.y.z`) to explicit `">=x.y.z <(x+1).0.0"` ranges for every dependency and dev_dependency, and other lower bounds bumped to the latest versions verified against the full test suite: `archive` 4.0.9 → 4.2.0, `image` 4.8.0 → 4.9.2, `html` 0.15.6 → 0.15.7. `dart pub get`, `dart analyze`, and the full `dart test` suite (406 tests) all pass against the new constraints.
+
 ## 1.3.2
 
 ### Fixed
