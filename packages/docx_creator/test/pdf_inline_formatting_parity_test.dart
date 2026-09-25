@@ -22,6 +22,23 @@ int _decorationStrokeCount(String content) {
   return pattern.allMatches(content).length;
 }
 
+/// Finds the page content stream's own operators among all of a PDF's
+/// `stream`/`endstream` blocks - needed once a non-WinAnsi character (e.g.
+/// a checkbox glyph) forces the bundled fallback font to be embedded,
+/// since its raw TrueType bytes are themselves a `stream`/`endstream`
+/// block and, being ~380KB of binary noise, can easily contain a stray
+/// two-letter match like `Tj` in it by pure chance.
+String _pageContentStream(List<int> pdfBytes) {
+  final pdf = String.fromCharCodes(pdfBytes);
+  for (final m in RegExp(r'stream\r?\n([\s\S]*?)endstream').allMatches(pdf)) {
+    final body = m.group(1)!;
+    if (!body.contains('BT') || !body.contains('Tf')) continue;
+    final printable = body.runes.where((c) => c >= 9 && c < 127).length;
+    if (printable / body.length > 0.9) return body;
+  }
+  throw StateError('page content stream not found');
+}
+
 void main() {
   test('bold+italic gets its own font everywhere (heading, paragraph, list, '
       'table cell)', () {
@@ -94,5 +111,46 @@ void main() {
 
     // One space glyph ("( ) Tj") per "foo bar" line above.
     expect('( ) Tj'.allMatches(content).length, 3);
+  });
+
+  test('checkbox box size follows its own run font size, not the line '
+      'default', () {
+    // Regression: _drawWordLine's checkbox branch sized the box from the
+    // outer line fontSize instead of the word's own (word.fontSize ??
+    // fontSize) - which _renderList/_renderCellParagraph's own,
+    // now-deleted, drawing loops got right - so a checkbox in a larger run
+    // silently drew at the document's default size instead of its own.
+    final doc = docx()
+        .add(DocxList(items: [
+          DocxListItem([DocxText('☐ Task', fontSize: 30)])
+        ]))
+        .build();
+
+    final bytes = PdfExporter(compressContent: false).exportToBytes(doc);
+    final content = String.fromCharCodes(bytes);
+
+    // boxSize = 30 * 0.8 = 24, not the ~12pt document default's 9.6.
+    expect(content, contains(RegExp(r'24\.0 24\.0 re S')));
+    expect(content, isNot(contains(RegExp(r'9\.6\d* 9\.6\d* re S'))));
+  });
+
+  test('a checkbox immediately followed by text still gets a separating '
+      'space glyph', () {
+    // Regression: the space-glyph fix above only fired in _drawWordLine's
+    // plain-text branch, so a checkbox word (its own branch, drawn as
+    // vector graphics rather than text) followed by a text word - a common
+    // task-list shape, e.g. DocxText('☐ Task') - still had no space
+    // glyph between them despite the positional gap.
+    final doc = docx().add(DocxParagraph.text('☐ Task')).build();
+
+    final bytes = PdfExporter(compressContent: false).exportToBytes(doc);
+    final pageContent = _pageContentStream(bytes);
+
+    // The checkbox glyph forces the Unicode-fallback embedded font (☐ has
+    // no WinAnsi representation), which encodes glyphs as hex CIDs rather
+    // than literal PDF strings - so count `Tj` operators instead of
+    // matching a literal `( ) Tj`: one for the space glyph, one for "Task"
+    // (the checkbox itself is drawn as vector graphics, not text).
+    expect(RegExp(r'Tj').allMatches(pageContent).length, 2);
   });
 }

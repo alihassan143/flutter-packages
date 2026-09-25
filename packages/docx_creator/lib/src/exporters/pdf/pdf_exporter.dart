@@ -891,6 +891,27 @@ class PdfExporter {
     return maxBlockHeight > textLineHeight ? maxBlockHeight : textLineHeight;
   }
 
+  /// Draws an invisible space glyph at [x] so a text extractor sees a word
+  /// boundary between a non-text element (checkbox, image, shape) and the
+  /// word before/after it, not just a positional gap - [_drawWordLine]'s
+  /// plain-text branch already does this for two adjacent text words;
+  /// without this, e.g. a checkbox immediately followed by a text word
+  /// (`'☐ Task'`, a common task-list shape) reads as `'Task'` glued
+  /// straight onto the checkbox once extracted/copy-pasted. A blank
+  /// [fontRef] (line breaks, and this helper's own callers for images/
+  /// shapes, which have no real font of their own) has nothing sensible to
+  /// draw with and is a no-op.
+  void _drawGapSpace(
+      PdfContentBuilder builder, double x, double y, String fontRef,
+      double fontSize) {
+    if (fontRef.isEmpty) return;
+    builder.beginText();
+    builder.setTextMatrix(x, y);
+    builder.setFont(fontRef, fontSize);
+    builder.showText(' ');
+    builder.endText();
+  }
+
   /// Strokes underline/strikethrough rules collected by [_drawWordLine]
   /// while drawing a paragraph/list item/cell's lines. Must run after the
   /// text is drawn - a line can't be stroked inside a PDF text object.
@@ -993,19 +1014,24 @@ class PdfExporter {
             word.imageHeight);
         textX += word.width;
         if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
+          _drawGapSpace(
+              builder, textX, y, PdfFontManager.fontRegular, fontSize);
           textX += spaceWidth + wordSpacing;
         }
       } else if (word.isShape) {
         _drawShape(builder, word.shape!, textX, y - word.shape!.height * 0.8);
         textX += word.width;
         if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
+          _drawGapSpace(
+              builder, textX, y, PdfFontManager.fontRegular, fontSize);
           textX += spaceWidth + wordSpacing;
         }
       } else if (word.isCheckbox) {
         // Draw checkbox manually
         builder.saveState();
 
-        final boxSize = fontSize * 0.8;
+        final checkboxFontSize = word.fontSize ?? fontSize;
+        final boxSize = checkboxFontSize * 0.8;
         final boxY = y - boxSize * 0.1;
 
         builder.setStrokeColorHex(word.color);
@@ -1024,6 +1050,7 @@ class PdfExporter {
         textX += word.width;
 
         if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
+          _drawGapSpace(builder, textX, y, word.fontRef, checkboxFontSize);
           textX += spaceWidth + wordSpacing;
         }
       } else {
