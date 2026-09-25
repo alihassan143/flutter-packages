@@ -71,4 +71,28 @@ void main() {
 
     expect(_decorationStrokeCount(content), 2);
   });
+
+  test(
+      'adjacent words draw an explicit space glyph so extracted text keeps '
+      'word boundaries', () {
+    // _drawWordLine (paragraphs, and - via this PR - lists/table cells)
+    // positions every word with its own absolute text-matrix move rather
+    // than relying on natural glyph advance, so a text extractor (pypdf,
+    // browser copy/paste, ...) sees no glyph-advance gap to infer a word
+    // boundary from unless an actual space glyph is drawn between words.
+    final doc = docx()
+        .add(DocxParagraph.text('foo bar'))
+        .add(DocxList(items: [DocxListItem.text('foo bar')]))
+        .add(DocxTable(rows: [
+          DocxTableRow(
+              cells: [DocxTableCell(children: [DocxParagraph.text('foo bar')])])
+        ]))
+        .build();
+
+    final bytes = PdfExporter(compressContent: false).exportToBytes(doc);
+    final content = String.fromCharCodes(bytes);
+
+    // One space glyph ("( ) Tj") per "foo bar" line above.
+    expect('( ) Tj'.allMatches(content).length, 3);
+  });
 }

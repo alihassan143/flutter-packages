@@ -1044,6 +1044,15 @@ class PdfExporter {
         builder.setFont(word.fontRef, effFontSize);
         builder.setFillColorHex(word.color);
         builder.showText(word.text);
+        // Every word gets its own absolutely-positioned Tj, so a text
+        // extractor (pypdf, browser copy/paste, ...) sees no natural glyph
+        // advance to infer a word boundary from - draw an actual space
+        // glyph between words instead of just leaving a positional gap, or
+        // adjacent words silently run together when extracted/searched.
+        if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
+          builder.setTextMatrix(textX + word.width, yPos);
+          builder.showText(' ');
+        }
         builder.endText();
 
         // Collect underline/strikethrough decorations
