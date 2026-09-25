@@ -855,13 +855,7 @@ class PdfExporter {
       y -= currentLineHeight;
     }
 
-    // Draw decorations (underline, strikethrough)
-    for (final dec in decorations) {
-      builder.saveState();
-      builder.setStrokeColorHex(dec.color);
-      builder.drawLine(dec.x, dec.y, dec.x + dec.width, dec.y, lineWidth: 0.5);
-      builder.restoreState();
-    }
+    _strokeDecorations(builder, decorations);
 
     if (lines.isEmpty) y = startY - lineHeight;
 
@@ -895,6 +889,19 @@ class PdfExporter {
     }
     final textLineHeight = maxFontInLine * 1.4;
     return maxBlockHeight > textLineHeight ? maxBlockHeight : textLineHeight;
+  }
+
+  /// Strokes underline/strikethrough rules collected by [_drawWordLine]
+  /// while drawing a paragraph/list item/cell's lines. Must run after the
+  /// text is drawn - a line can't be stroked inside a PDF text object.
+  void _strokeDecorations(
+      PdfContentBuilder builder, List<_TextDecoration> decorations) {
+    for (final dec in decorations) {
+      builder.saveState();
+      builder.setStrokeColorHex(dec.color);
+      builder.drawLine(dec.x, dec.y, dec.x + dec.width, dec.y, lineWidth: 0.5);
+      builder.restoreState();
+    }
   }
 
   /// Draws one already-flowed line of words (text, images, shapes,
@@ -1360,7 +1367,8 @@ class PdfExporter {
 
       var effFontSize = (word.fontSize ?? defaultFontSize).toDouble();
       if (word.isSuperscript || word.isSubscript) effFontSize *= 0.6;
-      final isBold = word.fontRef == PdfFontManager.fontBold;
+      final isBold = word.fontRef == PdfFontManager.fontBold ||
+          word.fontRef == PdfFontManager.fontBoldItalic;
       final runes = word.text.runes.toList();
 
       // Measure each rune's width once and accumulate a running sum while
@@ -1781,83 +1789,29 @@ class PdfExporter {
 
     // 3. Render each line
     var currentY = y - fontSize * 0.3; // Align baseline
+    final decorations = <_TextDecoration>[];
     for (final line in lines) {
       if (line.isEmpty) {
         currentY -= lineHeight;
         continue;
       }
 
-      builder.beginText();
-      builder.setTextMatrix(x, currentY);
+      _drawWordLine(
+        builder: builder,
+        line: line,
+        startX: x,
+        lineMaxWidth: width,
+        y: currentY,
+        fontSize: fontSize.toDouble(),
+        spaceWidth: spaceWidth,
+        align: DocxAlign.left,
+        isLastLine: true,
+        decorations: decorations,
+      );
 
-      var textX = x;
-      for (var k = 0; k < line.length; k++) {
-        final word = line[k];
-
-        // Background color
-        if (word.backgroundColor != null) {
-          builder.endText();
-          builder.saveState();
-          builder.setFillColorHex(word.backgroundColor!);
-          builder.fillRect(
-              textX, currentY - fontSize * 0.2, word.width, fontSize * 1.2);
-          builder.restoreState();
-          builder.beginText();
-          builder.setTextMatrix(textX, currentY);
-        }
-
-        // Font calculation
-        var effFontSize = word.fontSize ?? fontSize;
-        var yOffset = 0.0;
-        if (word.isSuperscript) {
-          effFontSize *= 0.6;
-          yOffset = fontSize * 0.4;
-        } else if (word.isSubscript) {
-          effFontSize *= 0.6;
-          yOffset = -fontSize * 0.2;
-        }
-
-        if (word.isCheckbox) {
-          builder.endText();
-          builder.saveState();
-
-          final boxSize = effFontSize * 0.8;
-          final boxY = currentY + yOffset - boxSize * 0.1;
-
-          builder.setStrokeColorHex(word.color);
-          builder.setLineWidth(1);
-          builder.strokeRect(textX, boxY, boxSize, boxSize);
-
-          if (word.checkboxType == 1 || word.checkboxType == 2) {
-            builder.moveTo(textX, boxY);
-            builder.lineTo(textX + boxSize, boxY + boxSize);
-            builder.moveTo(textX + boxSize, boxY);
-            builder.lineTo(textX, boxY + boxSize);
-            builder.strokePath();
-          }
-
-          builder.restoreState();
-          builder.beginText();
-          // Restore position for next word
-          builder.setTextMatrix(textX + word.width, currentY);
-        } else {
-          builder.setFont(word.fontRef, effFontSize.toDouble());
-          builder.setFillColorHex(word.color);
-          builder.setTextMatrix(textX, currentY + yOffset);
-          builder.showText(word.text);
-          builder.setTextMatrix(textX + word.width, currentY);
-        }
-
-        if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
-          builder.setTextMatrix(textX + word.width, currentY);
-          builder.showText(' ');
-          textX += spaceWidth;
-        }
-        textX += word.width;
-      }
-      builder.endText();
       currentY -= lineHeight;
     }
+    _strokeDecorations(builder, decorations);
 
     // Return total height used
     return lines.length * lineHeight;
@@ -1983,82 +1937,29 @@ class PdfExporter {
 
         // Render list item lines
         var currentY = y - fontSize * 0.3; // Align baseline (approx)
+        final decorations = <_TextDecoration>[];
         for (final line in lines) {
           if (line.isEmpty) {
             currentY -= lineHeight;
             continue;
           }
 
-          builder.beginText();
-          builder.setTextMatrix(contentX, currentY);
+          _drawWordLine(
+            builder: builder,
+            line: line,
+            startX: contentX,
+            lineMaxWidth: availableWidth,
+            y: currentY,
+            fontSize: fontSize.toDouble(),
+            spaceWidth: spaceWidth,
+            align: DocxAlign.left,
+            isLastLine: true,
+            decorations: decorations,
+          );
 
-          var textX = contentX;
-          for (var k = 0; k < line.length; k++) {
-            final word = line[k];
-
-            // Background
-            if (word.backgroundColor != null) {
-              builder.endText();
-              builder.saveState();
-              builder.setFillColorHex(word.backgroundColor!);
-              builder.fillRect(
-                  textX, currentY - fontSize * 0.2, word.width, fontSize * 1.2);
-              builder.restoreState();
-              builder.beginText();
-              builder.setTextMatrix(textX, currentY);
-            }
-
-            // Font & Style
-            var effFontSize = word.fontSize ?? fontSize;
-            var yOffset = 0.0;
-            if (word.isSuperscript) {
-              effFontSize *= 0.6;
-              yOffset = fontSize * 0.4;
-            } else if (word.isSubscript) {
-              effFontSize *= 0.6;
-              yOffset = -fontSize * 0.2;
-            }
-
-            if (word.isCheckbox) {
-              builder.endText();
-              builder.saveState();
-
-              final boxSize = effFontSize * 0.8;
-              final boxY = currentY + yOffset - boxSize * 0.1;
-
-              builder.setStrokeColorHex(word.color);
-              builder.setLineWidth(1);
-              builder.strokeRect(textX, boxY, boxSize, boxSize);
-
-              if (word.checkboxType == 1 || word.checkboxType == 2) {
-                builder.moveTo(textX, boxY);
-                builder.lineTo(textX + boxSize, boxY + boxSize);
-                builder.moveTo(textX + boxSize, boxY);
-                builder.lineTo(textX, boxY + boxSize);
-                builder.strokePath();
-              }
-
-              builder.restoreState();
-              builder.beginText();
-              builder.setTextMatrix(textX + word.width, currentY);
-            } else {
-              builder.setFont(word.fontRef, effFontSize.toDouble());
-              builder.setFillColorHex(word.color);
-              builder.setTextMatrix(textX, currentY + yOffset);
-              builder.showText(word.text);
-              builder.setTextMatrix(textX + word.width, currentY);
-            }
-
-            if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
-              builder.setTextMatrix(textX + word.width, currentY);
-              builder.showText(' ');
-              textX += spaceWidth;
-            }
-            textX += word.width;
-          }
-          builder.endText();
           currentY -= lineHeight;
         }
+        _strokeDecorations(builder, decorations);
         y = currentY;
       } else {
         y -= lineHeight;

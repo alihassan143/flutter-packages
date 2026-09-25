@@ -51,6 +51,7 @@ class PdfFontManager {
   static const String helvetica = 'Helvetica';
   static const String helveticaBold = 'Helvetica-Bold';
   static const String helveticaOblique = 'Helvetica-Oblique';
+  static const String helveticaBoldOblique = 'Helvetica-BoldOblique';
   static const String courier = 'Courier';
 
   /// Font references used in content streams
@@ -58,6 +59,11 @@ class PdfFontManager {
   static const String fontBold = '/F2';
   static const String fontItalic = '/F3';
   static const String fontMono = '/F4';
+
+  /// Bold+italic together. Named apart from the `/F1`-`/F4` standard refs
+  /// and the embedded-font series (which starts at `/F5`) so adding it
+  /// doesn't renumber anything.
+  static const String fontBoldItalic = '/FBI';
 
   /// Average character width as fraction of font size (fallback for unknown chars)
   static const double avgCharWidth = 0.5;
@@ -368,7 +374,7 @@ class PdfFontManager {
     }
 
     if (isMono) return fontMono;
-    if (isBold && isItalic) return fontBold; // No bold-italic in standard set
+    if (isBold && isItalic) return fontBoldItalic;
     if (isBold) return fontBold;
     if (isItalic) return fontItalic;
     return fontRegular;
@@ -505,6 +511,8 @@ class PdfFontManager {
     writeStandardFont('Helvetica', fontRegular, _charWidths);
     writeStandardFont('Helvetica-Bold', fontBold, _charWidthsBold);
     writeStandardFont('Helvetica-Oblique', fontItalic, _charWidths);
+    // Bold-Oblique shares Bold's advance widths (real fonts, not scaled).
+    writeStandardFont(helveticaBoldOblique, fontBoldItalic, _charWidthsBold);
     writeStandardFont('Courier', fontMono, null);
 
     // 2. Write embedded fonts

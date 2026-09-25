@@ -1,3 +1,9 @@
+## 1.3.4
+
+### Fixed
+- **PDF export — dropped inline formatting** (#125): `PdfFontManager.selectFont` had no bold-italic entry in the standard font set and fell back to bold-only, so *any* italic run inside a bold context (explicit bold+italic, or an italic run inside a heading, which is forced bold) rendered upright. Added `Helvetica-BoldOblique` (one of the standard 14 PDF fonts, so nothing to embed) as `PdfFontManager.fontBoldItalic`.
+- **PDF export — underline/strikethrough missing in list items and table cells** (#125): only the body-paragraph render path drew decoration lines; `_renderList` and `_renderCellParagraph` recorded `isUnderline`/`isStrike` on their words but never stroked them. Both now render through the same shared `_drawWordLine`/`_strokeDecorations` helpers `_renderParagraph` already used, instead of duplicating the word-drawing loop — fixing the whole bug class (and picking up background-color/checkbox/superscript handling parity with paragraphs as a side effect of no longer diverging) rather than patching each call site.
+
 ## 1.3.3
 
 ### Changed
