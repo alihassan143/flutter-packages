@@ -1,6 +1,6 @@
 name: docx_creator
 description: Create, read, and convert DOCX documents in pure Dart — fluent builder API, HTML/Markdown import and export, PDF export with Unicode fallback fonts, and a DOCX/PDF reader.
-version: 1.3.3
+version: 1.3.4
 repository: https://github.com/alihassan143/flutter-packages
 homepage: https://github.com/alihassan143/flutter-packages/tree/main/packages/docx_creator
 topics:
