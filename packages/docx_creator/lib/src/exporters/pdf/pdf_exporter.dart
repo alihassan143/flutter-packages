@@ -1215,7 +1215,7 @@ class PdfExporter implements PdfBlockMeasurer {
         final text = PdfContentBuilder.decodeHtmlEntities(child.content)
             .replaceAll('\r\n', '\n')
             .replaceAll('\t', '    ');
-        final token = RegExp(r'\n|[  ]+|[^  \n]+');
+        final token = RegExp(r'\n| +|[^ \n]+');
         for (final m in token.allMatches(text)) {
           final part = m.group(0)!;
           if (part == '\n') {
@@ -1224,21 +1224,25 @@ class PdfExporter implements PdfBlockMeasurer {
             pendingSpaces = 0;
             continue;
           }
-          if (part.trim().isEmpty && !part.contains(RegExp(r'[^  ]'))) {
+          if (part.startsWith(' ')) {
             pendingGap += spaceWidth * part.length;
             pendingSpaces += part.length;
             continue;
           }
 
           int? checkboxType;
-          if (part == '☐') checkboxType = 0;
-          if (part == '☑') checkboxType = 1;
-          if (part == '☒') checkboxType = 2;
+          if (part == '\u2610') checkboxType = 0;
+          if (part == '\u2611') checkboxType = 1;
+          if (part == '\u2612') checkboxType = 2;
           final isCheckbox = checkboxType != null;
 
           final lineStart = atLineStart();
-          final shown =
-              child.isAllCaps || child.isSmallCaps ? part.toUpperCase() : part;
+          // U+00A0 keeps its words together (it is not a token separator
+          // above) and is drawn as a plain space: not every font has it.
+          final nbspFree = part.replaceAll('\u00A0', ' ');
+          final shown = child.isAllCaps || child.isSmallCaps
+              ? nbspFree.toUpperCase()
+              : nbspFree;
           addWord(_Word(
             shown,
             fontRef,
@@ -1503,6 +1507,11 @@ class PdfExporter implements PdfBlockMeasurer {
       fit++;
     }
     final empty = paragraph.copyWith(children: const []);
+    // A first line taller than a whole page can never fit: place it anyway
+    // (on an empty page) so pagination always makes progress.
+    if (fit == 0 && _isFreshPage(availableHeight) && pl.lines.isNotEmpty) {
+      fit = 1;
+    }
     if (fit == 0) return [empty, paragraph];
     if (fit >= pl.lines.length) return [paragraph, empty];
 
@@ -1568,15 +1577,33 @@ class PdfExporter implements PdfBlockMeasurer {
       used += item.layout.height;
       fit++;
     }
+    // An item taller than a whole page is forced onto an empty page on its
+    // own, rather than taking every remaining item with it.
+    if (fit == 0 && _isFreshPage(availableHeight) && items.isNotEmpty) fit = 1;
     if (fit >= list.items.length) {
       return [list, list.copyWith(items: const [])];
     }
-    // Continue numbering in the remainder by carrying the top-level count.
-    final nextTop = fit == 0 ? list.startIndex : items[fit - 1].nextTopLevel;
-    return [
-      list.copyWith(items: list.items.take(fit).toList()),
-      list.copyWith(items: list.items.skip(fit).toList(), startIndex: nextTop),
-    ];
+    if (fit == 0) return [list.copyWith(items: const []), list];
+    // Continue numbering in the remainder at every level, not only the
+    // top one (a split inside a sub-list must not restart it at "a.").
+    final nextTop = items[fit - 1].nextTopLevel;
+    final rest = list.copyWith(
+        items: list.items.skip(fit).toList(), startIndex: nextTop);
+    _listCounterSeeds[rest] = Map.of(items[fit - 1].counters);
+    final fitted = list.copyWith(items: list.items.take(fit).toList());
+    // The kept part continues from wherever [list] itself continued.
+    final seed = _listCounterSeeds[list];
+    if (seed != null) _listCounterSeeds[fitted] = seed;
+    return [fitted, rest];
+  }
+
+  /// Per-level counters a list continued from a previous page starts from.
+  final _listCounterSeeds = Expando<Map<int, int>>();
+
+  /// Whether [availableHeight] is a whole empty page of the current section.
+  bool _isFreshPage(double availableHeight) {
+    final layout = _layoutEngine;
+    return layout != null && availableHeight >= layout.contentHeight - 0.5;
   }
 
   @override
@@ -1890,7 +1917,7 @@ class PdfExporter implements PdfBlockMeasurer {
   // ===========================================================================
 
   static const _defaultListStyle = DocxListStyle();
-  static const _defaultBullets = ['•', '○', '▪'];
+  static const _defaultBullets = ['\u2022', '\u25CB', '\u25AA'];
   static const _defaultNumberFormats = [
     DocxNumberFormat.decimal,
     DocxNumberFormat.lowerAlpha,
@@ -1918,7 +1945,8 @@ class PdfExporter implements PdfBlockMeasurer {
   List<_ListItemLayout> _layoutList(DocxList list, double width,
       {required bool register}) {
     final result = <_ListItemLayout>[];
-    final counters = <int, int>{};
+    final seed = _listCounterSeeds[list];
+    final counters = <int, int>{...?seed};
 
     for (final item in list.items) {
       final style = item.overrideStyle ?? list.style;
@@ -1928,7 +1956,7 @@ class PdfExporter implements PdfBlockMeasurer {
 
       String marker;
       if (list.isOrdered) {
-        final start = level == 0 ? list.startIndex : 1;
+        final start = level == 0 && seed == null ? list.startIndex : 1;
         final next = (counters[level] ?? (start - 1)) + 1;
         counters[level] = next;
         final format =
@@ -1959,6 +1987,7 @@ class PdfExporter implements PdfBlockMeasurer {
         markerBold: style.fontWeight == DocxFontWeight.bold,
         fontSize: itemFontSize,
         nextTopLevel: (counters[0] ?? (list.startIndex - 1)) + 1,
+        counters: Map.of(counters),
       ));
     }
     return result;
@@ -2462,6 +2491,9 @@ class _ListItemLayout {
   final double fontSize;
   final int nextTopLevel;
 
+  /// Counter state (level -> last number) after this item.
+  final Map<int, int> counters;
+
   _ListItemLayout({
     required this.layout,
     required this.marker,
@@ -2470,6 +2502,7 @@ class _ListItemLayout {
     required this.markerBold,
     required this.fontSize,
     required this.nextTopLevel,
+    this.counters = const {},
   });
 }
 

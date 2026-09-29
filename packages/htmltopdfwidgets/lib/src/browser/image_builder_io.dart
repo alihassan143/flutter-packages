@@ -97,10 +97,15 @@ Future<pw.Widget> buildImage(LayoutNode node) async {
       final image = pw.MemoryImage(imageBytes);
       // Without explicit dimensions, size the image like a browser does:
       // one CSS pixel = 0.75pt.
-      final width = node.style.width ??
+      var width = node.style.width ??
           (node.style.height == null && image.width != null
               ? image.width! * 0.75
               : null);
+      // max-width only ever shrinks the image.
+      final maxWidth = node.style.maxWidth;
+      if (maxWidth != null && width != null && width > maxWidth) {
+        width = maxWidth;
+      }
 
       return pw.Container(
         width: width,

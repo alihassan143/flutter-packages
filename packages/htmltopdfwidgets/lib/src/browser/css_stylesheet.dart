@@ -41,10 +41,7 @@ class CssStylesheet {
       if (prelude.startsWith('@')) {
         final at = prelude;
         if (at.startsWith('@media')) {
-          final query = at.substring(6).toLowerCase();
-          final screenOnly =
-              query.contains('screen') && !query.contains('print');
-          if (!screenOnly) _parseBlock(body);
+          if (mediaMatches(at.substring(6))) _parseBlock(body);
         } else if (at.startsWith('@supports')) {
           _parseBlock(body);
         }
@@ -74,6 +71,72 @@ class CssStylesheet {
         }
       }
     }
+  }
+
+  /// Viewport width used to evaluate `@media` width features: an A4/Letter
+  /// page at 96 CSS px per inch.
+  static const double mediaViewportPx = 794;
+
+  /// Evaluates a media query list for printed output: `print`/`all` media
+  /// types match (screen-only queries don't), `min-width`/`max-width`
+  /// compare against [mediaViewportPx], `orientation` is portrait, and any
+  /// other feature (e.g. `prefers-color-scheme`) is treated as unmatched.
+  static bool mediaMatches(String queryList) {
+    final queries = queryList.toLowerCase().split(',');
+    for (final raw in queries) {
+      var q = raw.trim();
+      if (q.isEmpty) return true;
+      var negate = false;
+      if (q.startsWith('not ')) {
+        negate = true;
+        q = q.substring(4).trim();
+      }
+      if (q.startsWith('only ')) q = q.substring(5).trim();
+
+      var matches = true;
+      for (final part in q.split(RegExp(r'\s+and\s+'))) {
+        final term = part.trim();
+        if (term.isEmpty) continue;
+        if (!term.startsWith('(')) {
+          matches &= term == 'print' || term == 'all';
+          continue;
+        }
+        final m =
+            RegExp(r'^\(\s*([a-z-]+)\s*(?::\s*([^)]+))?\)$').firstMatch(term);
+        if (m == null) {
+          matches = false;
+          continue;
+        }
+        final feature = m.group(1)!;
+        final value = m.group(2)?.trim();
+        double? px() {
+          if (value == null) return null;
+          final n = double.tryParse(value.replaceAll(RegExp(r'[a-z%]+$'), ''));
+          if (n == null) return null;
+          if (value.endsWith('em')) return n * 16;
+          if (value.endsWith('pt')) return n / 0.75;
+          return n;
+        }
+
+        switch (feature) {
+          case 'min-width':
+            final v = px();
+            matches &= v != null && mediaViewportPx >= v;
+            break;
+          case 'max-width':
+            final v = px();
+            matches &= v != null && mediaViewportPx <= v;
+            break;
+          case 'orientation':
+            matches &= value == 'portrait';
+            break;
+          default:
+            matches = false;
+        }
+      }
+      if (matches != negate) return true;
+    }
+    return false;
   }
 
   static int _matchingBrace(String s, int open) {

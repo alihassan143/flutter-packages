@@ -60,6 +60,9 @@ class CSSStyle {
   final double? width;
   final double? height;
 
+  /// CSS `max-width` in points (never stretches content up to it).
+  final double? maxWidth;
+
   /// Absolute line height in points.
   final double? lineHeight;
 
@@ -111,6 +114,7 @@ class CSSStyle {
     this.display,
     this.width,
     this.height,
+    this.maxWidth,
     this.lineHeight,
     this.lineHeightFactor,
     this.padding,
@@ -164,6 +168,7 @@ class CSSStyle {
       display: other.display ?? display,
       width: other.width ?? width,
       height: other.height ?? height,
+      maxWidth: other.maxWidth ?? maxWidth,
       // Absolute and unitless line heights are mutually exclusive.
       lineHeight: other.lineHeightFactor != null
           ? null
@@ -250,6 +255,7 @@ class CSSStyle {
       display: display,
       width: width,
       height: height,
+      maxWidth: maxWidth,
       padding: padding,
       paddingMask: paddingMask,
       margin: margin,
@@ -444,13 +450,12 @@ class CSSStyle {
           style = style.merge(CSSStyle(display: _parseDisplay(value)));
           break;
         case 'width':
-        case 'max-width':
-          // max-width is treated as width when no explicit width is given.
-          if (property == 'max-width' && declarations.containsKey('width')) {
-            break;
-          }
           final w = len(value);
           if (w != null) style = style.merge(CSSStyle(width: w));
+          break;
+        case 'max-width':
+          final w = len(value);
+          if (w != null) style = style.merge(CSSStyle(maxWidth: w));
           break;
         case 'height':
           final h = len(value);

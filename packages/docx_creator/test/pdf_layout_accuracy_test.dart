@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:convert';
 
 import 'package:docx_creator/docx_creator.dart';
@@ -340,6 +341,98 @@ void main() {
           .whereType<DocxText>()
           .single;
       expect(lower.content, 'abc');
+    });
+  });
+
+  group('Pagination edge cases', () {
+    test('a line taller than a page does not hang pagination', () {
+      final doc = docx()
+          .add(DocxParagraph(children: [
+            DocxText('Figure:'),
+            DocxLineBreak(),
+            DocxInlineImage(
+                bytes: Uint8List(0), extension: 'png', width: 50, height: 900),
+            DocxLineBreak(),
+            DocxText('after'),
+          ]))
+          .build();
+      final pages = _pageStreams(doc);
+      expect(pages.expand(_shownStrings), containsAll(['Figure:', 'after']));
+    });
+
+    test('an over-tall list item is placed alone, the rest continues', () {
+      final doc = docx()
+          .add(DocxList(isOrdered: true, items: [
+            DocxListItem.text('short'),
+            DocxListItem([
+              DocxInlineImage(
+                  bytes: Uint8List(0), extension: 'png', width: 50, height: 900)
+            ]),
+            for (var i = 0; i < 5; i++) DocxListItem.text('tail $i'),
+          ]))
+          .build();
+      final pages = _pageStreams(doc);
+      // The tail items must not be drawn on the page of the huge item.
+      final lastPage =
+          _shownStrings(pages.last).where((s) => s.trim().isNotEmpty).join(' ');
+      expect(lastPage, contains('tail 4'));
+      expect(pages.length, greaterThanOrEqualTo(3));
+    });
+
+    test('a table whose first row does not fit moves to the next page', () {
+      final builder = docx();
+      for (var i = 0; i < 40; i++) {
+        builder.add(DocxParagraph.text('filler $i'));
+      }
+      builder.add(DocxTable(rows: [
+        DocxTableRow(cells: [
+          DocxTableCell(children: [
+            for (var i = 0; i < 25; i++) DocxParagraph.text('cell line $i')
+          ])
+        ]),
+      ]));
+      final pages = _pageStreams(builder.build());
+      String words(String page) =>
+          _shownStrings(page).where((w) => w.trim().isNotEmpty).join(' ');
+      final tablePage =
+          pages.indexWhere((p) => words(p).contains('cell line 0 '));
+      expect(tablePage, greaterThan(0));
+      // The whole row moved to the fresh page instead of overflowing.
+      expect(words(pages[tablePage]), contains('cell line 24'));
+      for (final y in _textYs(pages[tablePage])) {
+        expect(y, greaterThan(72 - 4));
+      }
+    });
+
+    test('no-break spaces keep their words on one line', () {
+      final doc = docx()
+          .add(DocxParagraph(children: [
+            DocxText('${'x' * 90} Mr. Smith'),
+          ]))
+          .build();
+      final shown = _shownStrings(_pageStreams(doc).single);
+      expect(shown, contains('Mr. Smith'));
+    });
+
+    test('a list split inside a sub-list keeps its nested numbering', () {
+      final items = <DocxListItem>[];
+      for (var i = 0; i < 70; i++) {
+        items.add(DocxListItem.text('sub $i', level: 1));
+      }
+      final doc = docx()
+          .add(DocxList(
+              isOrdered: true, items: [DocxListItem.text('top'), ...items]))
+          .build();
+      final pages = _pageStreams(doc);
+      expect(pages.length, greaterThan(1));
+      final markers = pages
+          .expand(_shownStrings)
+          .where((s) => RegExp(r'^[a-z]+\.$').hasMatch(s))
+          .toList();
+      // 70 distinct letters: a..z, aa..az, ba..br - never restarting.
+      expect(markers.toSet().length, 70);
+      expect(markers.first, 'a.');
+      expect(markers.last, 'br.');
     });
   });
 

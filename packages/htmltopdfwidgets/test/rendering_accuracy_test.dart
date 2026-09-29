@@ -325,6 +325,59 @@ void main() {
     });
   });
 
+  group('Review fixes (round 2)', () {
+    RenderNode parse(String html) => HtmlParser(htmlString: html).parse();
+
+    test('a table cell longer than a page still paginates', () async {
+      final long = 'Lorem ipsum dolor sit amet, consectetur. ' * 400;
+      final widgets = await HTMLToPdf()
+          .convert('<table><tr><td>$long</td><td>side</td></tr></table>');
+      final doc = Document()..addPage(MultiPage(build: (_) => widgets));
+      expect(await doc.save(), isNotEmpty);
+      final table = widgets.whereType<Table>().single;
+      expect(table.children.length, greaterThan(1)); // split into rows
+    });
+
+    test('explicit widths in span mode are not treated as flex weights',
+        () async {
+      final widgets = await HTMLToPdf().convert(
+          '<table><tr><th colspan="2">Head</th></tr>'
+          '<tr><td width="80">A</td><td>${'long text ' * 20}</td></tr></table>');
+      final rowTable = widgets.whereType<Table>().last;
+      final widths = rowTable.columnWidths!;
+      final a = (widths[0] as FlexColumnWidth).flex;
+      final b = (widths[1] as FlexColumnWidth).flex;
+      // 80px = 60pt of ~480pt: the text column must get most of the width.
+      expect(b, greaterThan(a * 3));
+    });
+
+    test('empty bordered or padded divs are still drawn', () async {
+      final widgets = await HTMLToPdf()
+          .convert('<p>a</p><div style="border-bottom:1px solid #ccc"></div>'
+              '<div style="padding:10px;background:#eee"></div><p>b</p>');
+      final boxes = widgets.whereType<Container>().toList();
+      expect(boxes, hasLength(2));
+    });
+
+    test('@media width queries are evaluated for a printed page', () {
+      final root = parse('<style>'
+          '@media (max-width: 600px) { p { color: #ff0000 } }'
+          '@media print and (min-width: 500px) { p { font-weight: bold } }'
+          '@media screen { p { font-style: italic } }'
+          '</style><p>x</p>');
+      final p = _find(root, 'p');
+      expect(p.style.color, isNot(const PdfColor(1, 0, 0)));
+      expect(p.style.fontWeight, FontWeight.bold);
+      expect(p.style.fontStyle, isNot(FontStyle.italic));
+    });
+
+    test('max-width caps without stretching', () {
+      final style = CSSStyle.parse('max-width: 400px');
+      expect(style.width, isNull);
+      expect(style.maxWidth, 300);
+    });
+  });
+
   test('a mixed document lays out into a multi-page PDF', () async {
     final buffer = StringBuffer('<h1>Title</h1>');
     for (var i = 0; i < 40; i++) {

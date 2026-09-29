@@ -223,12 +223,20 @@ class PdfLayoutEngine {
 
             if (fitted.rows.isEmpty) {
               if (currentPage.isEmpty) {
-                // Doesn't fit even on an empty page (e.g. one huge row);
-                // place it anyway rather than looping forever.
-                currentPage.add(remainder);
-                remainingHeight -= measureTable(remainder);
-                remainder = remainder.copyWith(rows: const []);
-                break;
+                // Its first row (or rowSpan group) doesn't fit even on an
+                // empty page: place just that group and carry on, rather
+                // than looping forever or dumping the whole table here.
+                final forced =
+                    _splitTable(remainder, remainingHeight, force: true);
+                currentPage.add(forced.first);
+                remainingHeight -= measureTable(forced.first);
+                remainder = forced.last;
+                if (remainder.rows.isNotEmpty) {
+                  pages.add(currentPage);
+                  currentPage = [];
+                  remainingHeight = contentHeight;
+                }
+                continue;
               }
               pages.add(currentPage);
               currentPage = [];
@@ -630,7 +638,8 @@ class PdfLayoutEngine {
   /// remaining rows, mirroring [_splitParagraph] for tables. The remainder
   /// never repeats [DocxTable.hasHeader] (the header row itself stays with
   /// whichever chunk contains it).
-  List<DocxTable> _splitTable(DocxTable table, double availableHeight) {
+  List<DocxTable> _splitTable(DocxTable table, double availableHeight,
+      {bool force = false}) {
     if (table.rows.isEmpty) return [table, table.copyWith(rows: const [])];
 
     final colWidths = tableColumnWidths(table);
@@ -643,15 +652,22 @@ class PdfLayoutEngine {
     var lastBreak = 0;
 
     for (; i < table.rows.length; i++) {
-      if (i > 0 && usedHeight + heights[i] > availableHeight) break;
+      if (usedHeight + heights[i] > availableHeight) break;
       usedHeight += heights[i];
       if (i + 1 >= table.rows.length || !continues[i + 1]) lastBreak = i + 1;
     }
 
-    // Break at the last allowed boundary; if even the first group doesn't
-    // fit, force it through so pagination always makes progress.
-    i = lastBreak > 0 ? lastBreak : math.max(1, _groupEnd(continues, 0));
-    if (i > table.rows.length) i = table.rows.length;
+    // Break at the last allowed boundary. If even the first row (or rowSpan
+    // group) doesn't fit, report nothing fitted so the caller can move to a
+    // new page; only when [force]d (already on an empty page) is that
+    // group placed anyway.
+    if (lastBreak > 0) {
+      i = lastBreak;
+    } else if (force) {
+      i = math.min(_groupEnd(continues, 0), table.rows.length);
+    } else {
+      return [table.copyWith(rows: const []), table];
+    }
     final fittedRows = table.rows.sublist(0, i);
 
     final remainderRows = table.rows.sublist(i);

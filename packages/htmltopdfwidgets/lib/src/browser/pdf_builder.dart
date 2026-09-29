@@ -239,15 +239,25 @@ class PdfBuilder {
     }
 
     if (widgets.isEmpty) {
-      if (style.height != null && style.height! > 0) {
+      // An empty box still shows its padding, border and background, e.g.
+      // `<div style="border-bottom:1px solid">` separators.
+      double edge(pw.BorderSide? side) => sideVisible(side) ? side!.width : 0.0;
+      final boxHeight = style.height ??
+          (padding.top +
+              padding.bottom +
+              edge(border?.top) +
+              edge(border?.bottom));
+      if (boxHeight > 0 &&
+          (background != null || border != null || style.height != null)) {
         return _Block([
           _horizontalMargins(
-              pw.Container(
-                width: style.width ?? _fullWidth,
-                height: style.height,
-                padding: padding,
-                decoration: _boxDecoration(style),
-              ),
+              _maxWidth(
+                  pw.Container(
+                    width: style.width ?? _fullWidth,
+                    height: boxHeight,
+                    decoration: _boxDecoration(style),
+                  ),
+                  style),
               style)
         ], marginTop: marginTop, marginBottom: marginBottom);
       }
@@ -259,6 +269,7 @@ class PdfBuilder {
     final needsBox = background != null ||
         border != null ||
         style.width != null ||
+        style.maxWidth != null ||
         style.height != null;
 
     if (!needsBox) {
@@ -284,7 +295,10 @@ class PdfBuilder {
         decoration: _boxDecoration(style),
         child: content,
       );
-      if (style.width != null) box = _alignBlock(box, style);
+      box = _maxWidth(box, style);
+      if (style.width != null || style.maxWidth != null) {
+        box = _alignBlock(box, style);
+      }
       return _Block([_horizontalMargins(box, style)],
           marginTop: marginTop, marginBottom: marginBottom);
     }
@@ -331,6 +345,14 @@ class PdfBuilder {
   }
 
   double? get _fullWidth => _rowDepth > 0 ? null : double.infinity;
+
+  /// Caps a box at CSS `max-width` (it still fills up to that width).
+  pw.Widget _maxWidth(pw.Widget child, CSSStyle style) {
+    final max = style.maxWidth;
+    if (max == null || _rowDepth > 0) return child;
+    return pw.ConstrainedBox(
+        constraints: pw.BoxConstraints(maxWidth: max), child: child);
+  }
 
   /// Whether a block is small enough to be wrapped in a single non-spanning
   /// [pw.Container] (which cannot break across pages).
@@ -1204,7 +1226,21 @@ class PdfBuilder {
         }
       }
     }
-    double colFlex(int c) => explicit[c] ?? weights[c];
+    // Span mode lays rows out with flex widths only, so explicit widths (in
+    // points) are converted into the same flex units as the content
+    // weights, assuming the table spans a typical page content width.
+    final assumedWidth = node.style.width ?? node.style.maxWidth ?? 480.0;
+    final explicitTotal =
+        explicit.whereType<double>().fold<double>(0, (a, b) => a + b);
+    var flexTotal = 0.0;
+    for (var c = 0; c < columnCount; c++) {
+      if (explicit[c] == null) flexTotal += weights[c];
+    }
+    final pointsPerFlex = flexTotal > 0
+        ? math.max(40.0, assumedWidth - explicitTotal) / flexTotal
+        : 1.0;
+    double colFlex(int c) =>
+        explicit[c] != null ? explicit[c]! / pointsPerFlex : weights[c];
 
     final borderSide = _tableBorderSide(node);
     final tableBorder = borderSide == null
@@ -1217,16 +1253,18 @@ class PdfBuilder {
     final cellPaddingAttr =
         double.tryParse(node.attributes['cellpadding'] ?? '');
 
+    pw.EdgeInsets cellPadding(LayoutNode c) =>
+        c.style.padding ??
+        (c.tagName == 'th'
+            ? tagStyle.tableHeaderPadding
+            : tagStyle.tableCellPadding) ??
+        (cellPaddingAttr != null
+            ? pw.EdgeInsets.all(cellPaddingAttr * 0.75)
+            : const pw.EdgeInsets.all(5));
+
     Future<pw.Widget> buildCell(_GridCell cell, LayoutNode row) async {
       final c = cell.node;
-      final isHeader = c.tagName == 'th';
-      final padding = c.style.padding ??
-          (isHeader
-              ? tagStyle.tableHeaderPadding
-              : tagStyle.tableCellPadding) ??
-          (cellPaddingAttr != null
-              ? pw.EdgeInsets.all(cellPaddingAttr * 0.75)
-              : const pw.EdgeInsets.all(5));
+      final padding = cellPadding(c);
       final flow = _join(await _buildFlow(c.children, c.style));
       final content = flow.widgets.isEmpty
           ? pw.SizedBox()
@@ -1279,6 +1317,44 @@ class PdfBuilder {
     if (!hasSpans) {
       final rows = <pw.TableRow>[];
       for (var r = 0; r < grid.length; r++) {
+        // A table row can't break across pages: rows with very long cells
+        // are split into consecutive rows, one content chunk per cell.
+        final longRow =
+            grid[r].any((g) => g != null && _textLength(g.node) > 2000);
+        if (longRow) {
+          final parts = <List<pw.Widget>>[];
+          for (var c = 0; c < columnCount; c++) {
+            final cell = c < grid[r].length ? grid[r][c] : null;
+            parts.add(cell == null
+                ? const <pw.Widget>[]
+                : _join(await _buildFlow(cell.node.children, cell.node.style))
+                    .widgets);
+          }
+          pw.Widget chunkCell(int c, int k) {
+            final cell = c < grid[r].length ? grid[r][c] : null;
+            if (cell == null || k >= parts[c].length) return pw.SizedBox();
+            final pad = cellPadding(cell.node);
+            return pw.Container(
+              padding: pw.EdgeInsets.only(
+                left: pad.left,
+                right: pad.right,
+                top: k == 0 ? pad.top : 0,
+                bottom: k == parts[c].length - 1 ? pad.bottom : 0,
+              ),
+              color: cell.node.style.backgroundColor,
+              child: parts[c][k],
+            );
+          }
+
+          final chunks = parts.map((p) => p.length).fold<int>(1, math.max);
+          for (var k = 0; k < chunks; k++) {
+            rows.add(pw.TableRow(
+              decoration: rowDecoration(rowNodes[r]),
+              children: [for (var c = 0; c < columnCount; c++) chunkCell(c, k)],
+            ));
+          }
+          continue;
+        }
         final cells = <pw.Widget>[];
         for (var c = 0; c < columnCount; c++) {
           final cell = c < grid[r].length ? grid[r][c] : null;
