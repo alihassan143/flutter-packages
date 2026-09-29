@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import '../../../docx_creator.dart';
 import 'pdf_font_manager.dart';
 
@@ -22,6 +24,10 @@ abstract class PdfBlockMeasurer {
 
   /// Height of a table cell's content (including cell padding) in [width].
   double measureCell(DocxTableCell cell, double width);
+
+  /// Height of every row of [table] with the given column widths, using
+  /// the same span-aware cell placement and cell padding as drawing.
+  List<double> measureTableRowHeights(DocxTable table, List<double> colWidths);
 }
 
 /// Handles document layout, measurement, and pagination.
@@ -617,11 +623,7 @@ class PdfLayoutEngine {
     if (table.rows.isEmpty) return 0;
 
     final colWidths = tableColumnWidths(table);
-    double totalHeight = 0;
-    for (final row in table.rows) {
-      totalHeight += measureRowHeight(row, colWidths);
-    }
-    return totalHeight + 10;
+    return _rowHeights(table, colWidths).fold<double>(0, (a, b) => a + b) + 10;
   }
 
   /// Splits a table into a part that fits [availableHeight] and the
@@ -632,31 +634,63 @@ class PdfLayoutEngine {
     if (table.rows.isEmpty) return [table, table.copyWith(rows: const [])];
 
     final colWidths = tableColumnWidths(table);
-    final fittedRows = <DocxTableRow>[];
+    final heights = _rowHeights(table, colWidths);
+    final continues = _rowContinuesSpan(table);
     var usedHeight = 10.0; // trailing spacing measureTable() also reserves
     var i = 0;
+    // Last row index after which a page break is allowed (not inside a
+    // rowSpan group, which would orphan the spanned cells).
+    var lastBreak = 0;
 
     for (; i < table.rows.length; i++) {
-      final rowHeight = measureRowHeight(table.rows[i], colWidths);
-      if (fittedRows.isNotEmpty && usedHeight + rowHeight > availableHeight) {
-        break;
-      }
-      fittedRows.add(table.rows[i]);
-      usedHeight += rowHeight;
+      if (i > 0 && usedHeight + heights[i] > availableHeight) break;
+      usedHeight += heights[i];
+      if (i + 1 >= table.rows.length || !continues[i + 1]) lastBreak = i + 1;
     }
 
-    if (fittedRows.isEmpty) {
-      // Not even a single row fits; force one through so pagination always
-      // makes progress instead of looping forever on a too-tall row.
-      fittedRows.add(table.rows.first);
-      i = 1;
-    }
+    // Break at the last allowed boundary; if even the first group doesn't
+    // fit, force it through so pagination always makes progress.
+    i = lastBreak > 0 ? lastBreak : math.max(1, _groupEnd(continues, 0));
+    if (i > table.rows.length) i = table.rows.length;
+    final fittedRows = table.rows.sublist(0, i);
 
     final remainderRows = table.rows.sublist(i);
     return [
       table.copyWith(rows: fittedRows),
       table.copyWith(rows: remainderRows, hasHeader: false),
     ];
+  }
+
+  /// Row heights, exact when a [measurer] is set.
+  List<double> _rowHeights(DocxTable table, List<double> colWidths) {
+    final m = measurer;
+    if (m != null) return m.measureTableRowHeights(table, colWidths);
+    return [for (final row in table.rows) measureRowHeight(row, colWidths)];
+  }
+
+  /// For each row, whether a rowSpan cell from an earlier row still covers
+  /// it (so the table must not be split right before it).
+  List<bool> _rowContinuesSpan(DocxTable table) {
+    final result = List<bool>.filled(table.rows.length, false);
+    var coveredUntil = -1; // last row index covered by an open span
+    for (var r = 0; r < table.rows.length; r++) {
+      result[r] = r <= coveredUntil;
+      for (final cell in table.rows[r].cells) {
+        if (cell.rowSpan > 1) {
+          coveredUntil = math.max(coveredUntil, r + cell.rowSpan - 1);
+        }
+      }
+    }
+    return result;
+  }
+
+  /// End (exclusive) of the rowSpan group starting at [start].
+  int _groupEnd(List<bool> continues, int start) {
+    var end = start + 1;
+    while (end < continues.length && continues[end]) {
+      end++;
+    }
+    return end;
   }
 
   /// Measures cell height.

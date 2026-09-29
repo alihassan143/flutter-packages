@@ -186,7 +186,7 @@ class ColorUtils {
   static String? parseCssColorProperty(String style, String property) {
     final regex = RegExp(
       '(?<![-a-zA-Z])$property:\\s*[\'"]?'
-      r"(#[A-Fa-f0-9]{3,8}|rgba?\([0-9.,\s]+\)|[a-zA-Z]+)"
+      r"(#[A-Fa-f0-9]{3,8}|rgba?\([0-9.,\s]+\)|hsla?\([0-9.,%\s]+\)|[a-zA-Z]+)"
       '[\'"]?',
       caseSensitive: false,
     );

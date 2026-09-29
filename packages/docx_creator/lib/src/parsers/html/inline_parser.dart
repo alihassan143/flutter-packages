@@ -193,7 +193,7 @@ class HtmlInlineParser {
 
   DocxText createText(String text, HtmlStyleContext ctx) {
     return DocxText(
-      text,
+      _applyTextTransform(text, ctx.textTransform),
       fontWeight: ctx.fontWeight,
       fontStyle: ctx.fontStyle,
       decorations: ctx.decorations,
@@ -212,6 +212,20 @@ class HtmlInlineParser {
       isEmboss: ctx.isEmboss,
       isImprint: ctx.isImprint,
     );
+  }
+
+  /// `lowercase`/`capitalize` have no DOCX run property, so they rewrite
+  /// the text (uppercase is kept as the `caps` property instead).
+  static String _applyTextTransform(String text, String? transform) {
+    switch (transform) {
+      case 'lowercase':
+        return text.toLowerCase();
+      case 'capitalize':
+        return text.replaceAllMapped(RegExp(r'(^|[\s\-])(\S)'),
+            (m) => '${m.group(1)}${m.group(2)!.toUpperCase()}');
+      default:
+        return text;
+    }
   }
 
   String _getText(dom.Node node) {

@@ -218,6 +218,131 @@ void main() {
     });
   });
 
+  group('Review fixes', () {
+    test('row heights use span-aware columns and the table cell padding', () {
+      final longText = 'word ' * 40;
+      final table = DocxTable(
+        gridColumns: const [8000, 1200],
+        rows: [
+          DocxTableRow(cells: [
+            DocxTableCell(
+                rowSpan: 2, children: [DocxParagraph.text('spanning')]),
+            DocxTableCell(children: [DocxParagraph.text('b')]),
+          ]),
+          // The only cell of row 2 sits in the narrow second column.
+          DocxTableRow(cells: [
+            DocxTableCell(children: [DocxParagraph.text(longText)]),
+          ]),
+        ],
+      );
+      final exporter = PdfExporter();
+      final heights = exporter.measureTableRowHeights(table, [400, 60]);
+      final wide = exporter.measureTableRowHeights(
+          DocxTable(rows: [
+            DocxTableRow(cells: [
+              DocxTableCell(children: [DocxParagraph.text(longText)])
+            ])
+          ]),
+          [400]).single;
+      // Measured in the narrow column it is drawn in, not in column 0.
+      expect(heights[1], greaterThan(wide * 3));
+
+      DocxTable padded(int? padding) => DocxTable(
+            style: DocxTableStyle(cellPadding: padding),
+            rows: [
+              DocxTableRow(cells: [
+                DocxTableCell(children: [DocxParagraph.text(longText)])
+              ])
+            ],
+          );
+      expect(
+          exporter.measureTableRowHeights(padded(1440), [200]).single,
+          greaterThan(
+              exporter.measureTableRowHeights(padded(null), [200]).single));
+    });
+
+    test('tables never page-break inside a rowSpan group', () {
+      final rows = <DocxTableRow>[];
+      for (var i = 0; i < 80; i++) {
+        rows.add(DocxTableRow(cells: [
+          if (i % 5 == 0)
+            DocxTableCell(rowSpan: 5, children: [DocxParagraph.text('g$i')]),
+          DocxTableCell(children: [DocxParagraph.text('r$i')]),
+        ]));
+      }
+      final pages = _pageStreams(docx().add(DocxTable(rows: rows)).build());
+      expect(pages.length, greaterThan(1));
+      for (final page in pages.skip(1)) {
+        final firstRow = _shownStrings(page)
+            .firstWhere((s) => RegExp(r'^r\d+$').hasMatch(s), orElse: () => '');
+        if (firstRow.isEmpty) continue;
+        expect(int.parse(firstRow.substring(1)) % 5, 0,
+            reason: 'page starts mid-group at $firstRow');
+      }
+    });
+
+    test('text-align is inherited, and explicit left survives in cells',
+        () async {
+      final nodes = await DocxParser.fromHtml(
+          '<div style="text-align:center"><p>inherited</p></div>'
+          '<table><tr><td style="text-align:center">'
+          '<p style="text-align:left">explicit</p><p>cell</p>'
+          '</td></tr></table>');
+      expect(nodes.whereType<DocxParagraph>().first.align, DocxAlign.center);
+      final cellParas = nodes
+          .whereType<DocxTable>()
+          .single
+          .rows
+          .single
+          .cells
+          .single
+          .children
+          .whereType<DocxParagraph>()
+          .toList();
+      expect(cellParas[0].align, DocxAlign.left);
+      expect(cellParas[1].align, DocxAlign.center);
+    });
+
+    test('margin shorthand and longhands apply in declaration order', () async {
+      final nodes =
+          await DocxParser.fromHtml('<p style="margin-top:24px;margin:0">a</p>'
+              '<p style="margin:0;margin-top:12pt">b</p>');
+      final ps = nodes.whereType<DocxParagraph>().toList();
+      expect(ps[0].spacingBefore, 0);
+      expect(ps[1].spacingBefore, 240);
+      expect(ps[1].spacingAfter, 0);
+    });
+
+    test('HSL link colors, list-style none and lowercase', () async {
+      final nodes = await DocxParser.fromHtml(
+          '<p><a href="https://x.dev" style="color: hsl(0, 100%, 50%)">red</a></p>'
+          '<ol style="list-style-type: none"><li>x</li></ol>'
+          '<p style="text-transform: lowercase">ABC</p>');
+      final link = nodes
+          .whereType<DocxParagraph>()
+          .first
+          .children
+          .whereType<DocxText>()
+          .single;
+      expect(link.effectiveColorHex?.toUpperCase(), 'FF0000');
+
+      final list = nodes.whereType<DocxList>().single;
+      expect(list.style.bullet, '');
+      expect(list.isOrdered, isFalse);
+      final shown = _shownStrings(
+          _pageStreams(DocxBuiltDocument(elements: [list])).single);
+      expect(shown.where((s) => s.trim().isNotEmpty), ['x']);
+
+      final lower = nodes
+          .whereType<DocxParagraph>()
+          .last
+          .children
+          .whereType<DocxText>()
+          .single;
+      expect(lower.content, 'abc');
+    });
+  });
+
   test('reading a DOCX keeps nested list indentation per level', () async {
     final doc = docx()
         .add(DocxList(isOrdered: true, items: [

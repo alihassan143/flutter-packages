@@ -1548,11 +1548,14 @@ class PdfExporter implements PdfBlockMeasurer {
   }
 
   @override
-  double measureList(DocxList list, double width) {
-    final items = _layoutList(list, width, register: false);
-    return items.fold<double>(0, (sum, i) => sum + i.layout.height) +
-        fontSize0 * 0.5;
-  }
+  double measureList(DocxList list, double width) =>
+      _measureListBody(list, width) + fontSize0 * 0.5;
+
+  /// Height of a list's items alone, as [_drawList] draws them (body lists
+  /// add `fontSize * 0.5` of trailing space on top, see [_renderList]).
+  double _measureListBody(DocxList list, double width) =>
+      _layoutList(list, width, register: false)
+          .fold<double>(0, (sum, i) => sum + i.layout.height);
 
   @override
   List<DocxList> splitList(
@@ -1578,21 +1581,35 @@ class PdfExporter implements PdfBlockMeasurer {
 
   @override
   double measureCell(DocxTableCell cell, double width) =>
-      _cellPadding(cell).vertical +
-      _measureBlocks(cell.children, width - _cellPadding(cell).horizontal);
+      _measureCell(cell, width, null);
 
-  /// Height of a sequence of blocks laid out in a table cell.
+  @override
+  List<double> measureTableRowHeights(
+          DocxTable table, List<double> colWidths) =>
+      _tableRowHeights(table, _placeTable(table, colWidths, 0));
+
+  /// Height of a cell's content plus padding. [tablePadding] is the owning
+  /// table's `DocxTableStyle.cellPadding` (twips).
+  double _measureCell(DocxTableCell cell, double width, int? tablePadding) {
+    final pad = _cellPadding(cell, tablePadding);
+    return pad.vertical + _measureBlocks(cell.children, width - pad.horizontal);
+  }
+
+  /// Height of a sequence of blocks laid out in a table cell. Mirrors the
+  /// cell drawing loop in [_renderTable] block for block.
   double _measureBlocks(List<DocxBlock> blocks, double width) {
     var height = 0.0;
     for (final block in blocks) {
       if (block is DocxParagraph) {
         height += _layoutParagraph(block, width, kind: _ParaKind.cell).height;
       } else if (block is DocxList) {
-        height += measureList(block, width);
+        height += _measureListBody(block, width);
       } else if (block is DocxTable) {
         height += _measureNestedTable(block, width);
       } else if (block is DocxImage) {
-        height += math.min(block.height, 10000) + 4;
+        final scale =
+            block.width > width && block.width > 0 ? width / block.width : 1.0;
+        height += block.height * scale + 4;
       }
     }
     return height;
@@ -1600,36 +1617,101 @@ class PdfExporter implements PdfBlockMeasurer {
 
   double _measureNestedTable(DocxTable table, double width) {
     final colWidths = _proportionalColumnWidths(table, width);
-    var height = 0.0;
-    for (final row in table.rows) {
-      height += _rowHeight(row, colWidths);
-    }
-    return height + 4;
+    if (colWidths.isEmpty) return 0;
+    final heights = _tableRowHeights(table, _placeTable(table, colWidths, 0));
+    return heights.fold<double>(0, (a, b) => a + b) + 4;
   }
 
-  double _rowHeight(DocxTableRow row, List<double> colWidths) {
-    var maxHeight = (row.height ?? 0) / 20.0;
-    var col = 0;
-    for (final cell in row.cells) {
-      var w = 0.0;
-      for (var j = 0; j < cell.colSpan && col + j < colWidths.length; j++) {
-        w += colWidths[col + j];
-      }
-      maxHeight = math.max(maxHeight, measureCell(cell, w));
-      col += cell.colSpan;
+  /// Places every row's cells on the table grid, skipping columns still
+  /// covered by a rowSpan cell from an earlier row (rows omit the cells of
+  /// spanned columns, the convention the DOCX writer follows). Shared by
+  /// drawing, row-height measurement and pagination so they always agree.
+  List<List<_CellPlacement>> _placeTable(
+      DocxTable table, List<double> colWidths, double originX) {
+    final colX = List<double>.filled(colWidths.length + 1, originX);
+    for (var i = 0; i < colWidths.length; i++) {
+      colX[i + 1] = colX[i] + colWidths[i];
     }
-    return maxHeight;
+    // Column index -> rows still covered after the current one.
+    final activeSpans = <int, int>{};
+    final result = <List<_CellPlacement>>[];
+    for (var r = 0; r < table.rows.length; r++) {
+      final placements = <_CellPlacement>[];
+      final startedHere = <int>{};
+      var colIndex = 0;
+      for (final cell in table.rows[r].cells) {
+        while (
+            colIndex < colWidths.length && (activeSpans[colIndex] ?? 0) > 0) {
+          colIndex++;
+        }
+        if (colIndex >= colWidths.length) break;
+        final span = math.min(cell.colSpan, colWidths.length - colIndex);
+        final width = colX[colIndex + span] - colX[colIndex];
+        placements.add(_CellPlacement(cell, colIndex, colX[colIndex], width,
+            row: r,
+            rowSpan:
+                math.max(1, math.min(cell.rowSpan, table.rows.length - r))));
+        if (cell.rowSpan > 1) {
+          for (var j = 0; j < span; j++) {
+            activeSpans[colIndex + j] = cell.rowSpan - 1;
+            startedHere.add(colIndex + j);
+          }
+        }
+        colIndex += span;
+      }
+      // Age spans that were already active going into this row.
+      for (final key in activeSpans.keys.toList()) {
+        if (startedHere.contains(key)) continue;
+        final remaining = activeSpans[key]! - 1;
+        if (remaining <= 0) {
+          activeSpans.remove(key);
+        } else {
+          activeSpans[key] = remaining;
+        }
+      }
+      result.add(placements);
+    }
+    return result;
+  }
+
+  /// Row heights for placed rows: each row fits its single-row cells (and
+  /// its explicit `height`); a rowSpan cell taller than the rows it spans
+  /// grows the last of them.
+  List<double> _tableRowHeights(
+      DocxTable table, List<List<_CellPlacement>> placed) {
+    final padding = table.style.cellPadding;
+    final heights = [
+      for (final row in table.rows) (row.height ?? 0) / 20.0,
+    ];
+    for (final row in placed) {
+      for (final p in row) {
+        if (p.rowSpan == 1) {
+          heights[p.row] =
+              math.max(heights[p.row], _measureCell(p.cell, p.width, padding));
+        }
+      }
+    }
+    for (final row in placed) {
+      for (final p in row) {
+        if (p.rowSpan <= 1) continue;
+        final needed = _measureCell(p.cell, p.width, padding);
+        var have = 0.0;
+        for (var r = p.row; r < p.row + p.rowSpan; r++) {
+          have += heights[r];
+        }
+        if (needed > have) heights[p.row + p.rowSpan - 1] += needed - have;
+      }
+    }
+    return heights;
   }
 
   /// Cell padding: the cell's own left/right margins, else the table-wide
   /// cell padding, else Word's defaults (0.08" left/right).
-  _Insets _cellPadding(DocxTableCell cell) {
-    final left = (cell.marginLeft ?? _currentCellPadding ?? 115) / 20.0;
-    final right = (cell.marginRight ?? _currentCellPadding ?? 115) / 20.0;
+  _Insets _cellPadding(DocxTableCell cell, int? tablePadding) {
+    final left = (cell.marginLeft ?? tablePadding ?? 115) / 20.0;
+    final right = (cell.marginRight ?? tablePadding ?? 115) / 20.0;
     return _Insets(left, 3, right, 3);
   }
-
-  int? _currentCellPadding;
 
   // ===========================================================================
   // Tables
@@ -1657,77 +1739,46 @@ class PdfExporter implements PdfBlockMeasurer {
         ? _proportionalColumnWidths(table, availableWidth)
         : layout.tableColumnWidths(table);
     if (colWidths.isEmpty) return startY;
-    final previousPadding = _currentCellPadding;
-    _currentCellPadding = table.style.cellPadding;
-
     final originX = availableWidth == null
         ? startX + layout.tableOffset(table, colWidths)
         : startX;
-    final colX = List<double>.filled(colWidths.length + 1, originX);
-    for (var i = 0; i < colWidths.length; i++) {
-      colX[i + 1] = colX[i] + colWidths[i];
+    final placed = _placeTable(table, colWidths, originX);
+    final heights = _tableRowHeights(table, placed);
+    final padding = table.style.cellPadding;
+
+    // Top edge of every row, so a rowSpan cell can cover several rows.
+    final rowTop = List<double>.filled(table.rows.length + 1, startY);
+    for (var r = 0; r < table.rows.length; r++) {
+      rowTop[r + 1] = rowTop[r] - heights[r];
     }
+    double cellHeight(_CellPlacement p) =>
+        rowTop[p.row] - rowTop[p.row + p.rowSpan];
 
-    var y = startY;
-    // Columns still occupied by a rowSpan cell that started on an earlier
-    // row: column index -> rows remaining (including the current one).
-    final activeSpans = <int, int>{};
-
-    for (final row in table.rows) {
-      final rowHeight = _rowHeight(row, colWidths);
-
-      // Map this row's cells onto grid columns, skipping columns currently
-      // occupied by a taller cell spanning down from a previous row. This
-      // assumes rows omit cells for spanned columns (the convention the
-      // DOCX writer itself follows).
-      final placements = <_CellPlacement>[];
-      var colIndex = 0;
-      for (final cell in row.cells) {
-        while (
-            colIndex < colWidths.length && (activeSpans[colIndex] ?? 0) > 0) {
-          colIndex++;
-        }
-        if (colIndex >= colWidths.length) break;
-
-        var spanWidth = 0.0;
-        for (var j = 0;
-            j < cell.colSpan && colIndex + j < colWidths.length;
-            j++) {
-          spanWidth += colWidths[colIndex + j];
-        }
-        placements
-            .add(_CellPlacement(cell, colIndex, colX[colIndex], spanWidth));
-        if (cell.rowSpan > 1) {
-          for (var j = 0; j < cell.colSpan; j++) {
-            activeSpans[colIndex + j] = cell.rowSpan - 1;
-          }
-        }
-        colIndex += cell.colSpan;
-      }
-
+    for (final row in placed) {
       // Backgrounds
-      for (final p in placements) {
+      for (final p in row) {
         final fill = p.cell.shadingFill;
         if (fill != null && fill != 'auto') {
           builder.saveState();
           builder.setFillColorHex(fill.replaceAll('#', ''));
-          builder.fillRect(p.x, y - rowHeight, p.width, rowHeight);
+          builder.fillRect(
+              p.x, rowTop[p.row] - cellHeight(p), p.width, cellHeight(p));
           builder.restoreState();
         }
       }
 
       // Borders: cell-level override wins, else the table's uniform style
       // (honoring DocxTableStyle.plain / DocxBorder.none as "no border").
-      for (final p in placements) {
-        _drawCellBorders(builder, table, p, y, rowHeight);
+      for (final p in row) {
+        _drawCellBorders(builder, table, p, rowTop[p.row], cellHeight(p));
       }
 
-      // Content, vertically aligned within the row.
-      for (final p in placements) {
-        final pad = _cellPadding(p.cell);
+      // Content, vertically aligned within the (possibly spanned) cell.
+      for (final p in row) {
+        final pad = _cellPadding(p.cell, padding);
         final innerWidth = p.width - pad.horizontal;
         final contentHeight = _measureBlocks(p.cell.children, innerWidth);
-        final slack = rowHeight - pad.vertical - contentHeight;
+        final slack = cellHeight(p) - pad.vertical - contentHeight;
         var offset = 0.0;
         if (slack > 0) {
           if (p.cell.verticalAlign == DocxVerticalAlign.center) {
@@ -1737,7 +1788,7 @@ class PdfExporter implements PdfBlockMeasurer {
           }
         }
         final cellX = p.x + pad.left;
-        var cellY = y - pad.top - offset;
+        var cellY = rowTop[p.row] - pad.top - offset;
         for (final block in p.cell.children) {
           if (block is DocxParagraph) {
             final pl = _layoutParagraph(block, innerWidth,
@@ -1746,38 +1797,21 @@ class PdfExporter implements PdfBlockMeasurer {
           } else if (block is DocxList) {
             cellY = _drawList(block, builder, cellX, cellY, innerWidth);
           } else if (block is DocxTable) {
+            // Nested tables end 4pt below their last row, matching
+            // [_measureNestedTable].
             cellY = _renderTable(block, builder, cellX, cellY, layout,
-                    availableWidth: innerWidth) +
-                6;
+                availableWidth: innerWidth);
           } else if (block is DocxImage) {
+            // _renderImage leaves 10pt below the image; cells use 4pt.
             cellY = _renderImage(block, builder, cellX, cellY, layout,
                     availableWidth: innerWidth) +
                 6;
           }
         }
       }
-
-      // Age spans that were already active going into this row; ones that
-      // just started here already have `rowSpan - 1` remaining rows AFTER
-      // this one, so they're left untouched.
-      final startedHere = <int>{
-        for (final p in placements)
-          for (var j = 0; j < p.cell.colSpan; j++) p.colIndex + j
-      };
-      for (final key in activeSpans.keys.toList()) {
-        if (startedHere.contains(key)) continue;
-        final remaining = activeSpans[key]! - 1;
-        if (remaining <= 0) {
-          activeSpans.remove(key);
-        } else {
-          activeSpans[key] = remaining;
-        }
-      }
-
-      y -= rowHeight;
     }
 
-    _currentCellPadding = previousPadding;
+    final y = rowTop[table.rows.length];
     return y - (availableWidth == null ? 10 : 4);
   }
 
@@ -2004,7 +2038,7 @@ class PdfExporter implements PdfBlockMeasurer {
     var y = startY;
     for (final item in _layoutList(list, width, register: true)) {
       final pl = item.layout;
-      if (pl.lines.isNotEmpty) {
+      if (pl.lines.isNotEmpty && item.marker.isNotEmpty) {
         final baseline =
             y - pl.spaceBefore - pl.padTop - pl.lines.first.baseline;
         final markerFont = _withUnicodeFallback(
@@ -2193,7 +2227,12 @@ class _CellPlacement {
   final double x;
   final double width;
 
-  const _CellPlacement(this.cell, this.colIndex, this.x, this.width);
+  /// Row the cell starts in, and how many rows it covers.
+  final int row;
+  final int rowSpan;
+
+  const _CellPlacement(this.cell, this.colIndex, this.x, this.width,
+      {this.row = 0, this.rowSpan = 1});
 }
 
 /// A drawable border side: color plus stroke width in points.

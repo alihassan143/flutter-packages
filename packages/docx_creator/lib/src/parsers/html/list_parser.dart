@@ -112,11 +112,13 @@ class HtmlListParser {
       }
     }
 
+    final style = _listStyleFor(element, ordered);
     return DocxList(
       items: items,
-      isOrdered: ordered,
+      // A marker-less list is emitted as an (empty) bullet list.
+      isOrdered: ordered && style.bullet.isNotEmpty,
       startIndex: startIndex,
-      style: _listStyleFor(element, ordered),
+      style: style,
     );
   }
 
@@ -142,6 +144,10 @@ class HtmlListParser {
       };
     }
     if (type == null) return const DocxListStyle();
+    // `none`: no marker (an empty bullet, rendered as nothing in DOCX/PDF).
+    if (RegExp(r'(^|\s)none(\s|$)').hasMatch(type.trim())) {
+      return const DocxListStyle(bullet: '');
+    }
     if (type.contains('lower-alpha') || type.contains('lower-latin')) {
       return DocxListStyle.lowerAlpha;
     }

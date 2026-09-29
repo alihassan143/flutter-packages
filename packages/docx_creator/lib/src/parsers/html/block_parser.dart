@@ -44,7 +44,9 @@ class HtmlBlockParser {
 
     void flushInlineBuffer() {
       if (inlineBuffer.isEmpty) return;
-      results.add(DocxParagraph(children: List.of(inlineBuffer)));
+      results.add(DocxParagraph(
+          children: List.of(inlineBuffer),
+          align: ctx.textAlign ?? DocxAlign.left));
       inlineBuffer.clear();
     }
 
@@ -80,6 +82,10 @@ class HtmlBlockParser {
               text, styleContext ?? const HtmlStyleContext())
         ],
       );
+      final align = styleContext?.textAlign;
+      if (built is DocxParagraph && align != null) {
+        return [built.copyWith(align: align)];
+      }
       return built != null ? [built] : [];
     }
     if (node is dom.Element) {
@@ -153,7 +159,19 @@ class HtmlBlockParser {
       return [built];
     }
 
-    final blockStyles = _parseBlockStyles(styleStr);
+    // Vertical margins resolve in declaration order, class rules first
+    // and inline style last (mergeStyles puts inline first for its
+    // first-match lookups, so it can't be scanned in order).
+    final classMargins =
+        _orderedVerticalMargins(context.mergeStyles(null, element.classes));
+    final inlineMargins =
+        _orderedVerticalMargins(element.attributes['style'] ?? '');
+    final blockStyles = _parseBlockStyles(
+      styleStr,
+      inheritedAlign: parentCtx.textAlign,
+      spacingBefore: inlineMargins.$1 ?? classMargins.$1,
+      spacingAfter: inlineMargins.$2 ?? classMargins.$2,
+    );
 
     switch (tag) {
       case 'p':
@@ -306,10 +324,17 @@ class HtmlBlockParser {
     );
   }
 
-  HtmlBlockStyles _parseBlockStyles(String style) {
+  HtmlBlockStyles _parseBlockStyles(
+    String style, {
+    DocxAlign? inheritedAlign,
+    int? spacingBefore,
+    int? spacingAfter,
+  }) {
     String? shadingFill;
     final lineHeight = _parseLineHeight(style);
-    DocxAlign align = DocxAlign.left;
+    // text-align is inherited: a paragraph without its own uses the
+    // nearest ancestor's.
+    DocxAlign align = inheritedAlign ?? DocxAlign.left;
 
     final bgMatch = RegExp(
             r"background-color:\s*['\x22]?(#[A-Fa-f0-9]{3,6}|rgba?\([0-9.,\s]+\)|hsla?\([0-9.,%\s]+\)|[a-zA-Z]+)['\x22]?",
@@ -344,6 +369,10 @@ class HtmlBlockParser {
     final alignMatch = RegExp(r'text-align\s*:\s*(\w+)', caseSensitive: false)
         .firstMatch(style);
     switch (alignMatch?.group(1)?.toLowerCase()) {
+      case 'left':
+      case 'start':
+        align = DocxAlign.left;
+        break;
       case 'center':
         align = DocxAlign.center;
         break;
@@ -371,26 +400,45 @@ class HtmlBlockParser {
       indentRight: _lengthPropertyTwips(style, 'margin-right') ??
           _lengthPropertyTwips(style, 'padding-right'),
       indentFirstLine: _lengthPropertyTwips(style, 'text-indent'),
-      spacingBefore: _lengthPropertyTwips(style, 'margin-top') ??
-          _marginShorthandTwips(style, top: true),
-      spacingAfter: _lengthPropertyTwips(style, 'margin-bottom') ??
-          _marginShorthandTwips(style, top: false),
+      spacingBefore: spacingBefore,
+      spacingAfter: spacingAfter,
       lineSpacing: lineHeight?.$1,
       lineRule: lineHeight?.$2,
     );
   }
 
-  /// Vertical component of a CSS `margin` shorthand, in twips.
-  int? _marginShorthandTwips(String style, {required bool top}) {
-    final match =
-        RegExp(r'(?<![-a-zA-Z])margin\s*:\s*([^;]+)', caseSensitive: false)
-            .firstMatch(style);
-    if (match == null) return null;
-    final parts = match.group(1)!.trim().split(RegExp(r'\s+'));
-    final value = top ? parts[0] : (parts.length >= 3 ? parts[2] : parts[0]);
-    if (value.toLowerCase() == 'auto') return null;
-    final points = ColorUtils.parseCssLengthToPoints(value);
-    return points != null ? (points * 20).round() : null;
+  /// Space before/after (twips) from `margin`, `margin-top` and
+  /// `margin-bottom`, applied in declaration order so a later shorthand
+  /// overrides an earlier longhand and vice versa.
+  (int?, int?) _orderedVerticalMargins(String css) {
+    int? before;
+    int? after;
+    int? twips(String value) {
+      final v = value.trim().toLowerCase();
+      if (v == 'auto') return 0;
+      final points = ColorUtils.parseCssLengthToPoints(v);
+      return points != null ? (points * 20).round() : null;
+    }
+
+    for (final decl in css.split(';')) {
+      final idx = decl.indexOf(':');
+      if (idx <= 0) continue;
+      final prop = decl.substring(0, idx).trim().toLowerCase();
+      final value = decl
+          .substring(idx + 1)
+          .replaceAll(RegExp(r'!\s*important'), '')
+          .trim();
+      if (prop == 'margin') {
+        final parts = value.split(RegExp(r'\s+'));
+        before = twips(parts[0]) ?? before;
+        after = twips(parts.length >= 3 ? parts[2] : parts[0]) ?? after;
+      } else if (prop == 'margin-top') {
+        before = twips(value) ?? before;
+      } else if (prop == 'margin-bottom') {
+        after = twips(value) ?? after;
+      }
+    }
+    return (before, after);
   }
 
   /// CSS `line-height` as DOCX line spacing: unitless/percent values are
