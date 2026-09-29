@@ -1,6 +1,29 @@
 import '../../../docx_creator.dart';
 import 'pdf_font_manager.dart';
 
+/// Exact block measurement supplied by the renderer, so pagination uses the
+/// very same line breaking, fonts and spacing that are later drawn instead
+/// of an approximation that can drift from it (which previously let content
+/// run past the bottom margin, or leave large gaps).
+abstract class PdfBlockMeasurer {
+  /// Height of a body paragraph laid out in [width] points.
+  double measureParagraph(DocxParagraph paragraph, double width);
+
+  /// Splits [paragraph] at the last line that fits in [availableHeight];
+  /// returns `[fitted, remainder]` (fitted has no children if nothing fits).
+  List<DocxParagraph> splitParagraph(
+      DocxParagraph paragraph, double width, double availableHeight);
+
+  /// Height of a list laid out in [width] points.
+  double measureList(DocxList list, double width);
+
+  /// Splits [list] between items; returns `[fitted, remainder]`.
+  List<DocxList> splitList(DocxList list, double width, double availableHeight);
+
+  /// Height of a table cell's content (including cell padding) in [width].
+  double measureCell(DocxTableCell cell, double width);
+}
+
 /// Handles document layout, measurement, and pagination.
 ///
 /// Uses a two-pass approach: measure blocks first, then render.
@@ -19,6 +42,10 @@ class PdfLayoutEngine {
   /// footnotes end up referenced on each page.
   final Map<int, DocxFootnote> footnotesById;
 
+  /// When set, all paragraph/list/cell measurement and paragraph/list
+  /// splitting is delegated to it (see [PdfBlockMeasurer]).
+  final PdfBlockMeasurer? measurer;
+
   PdfLayoutEngine({
     required this.pageWidth,
     required this.pageHeight,
@@ -29,6 +56,7 @@ class PdfLayoutEngine {
     this.baseFontSize = 12,
     PdfFontManager? fontManager,
     Map<int, DocxFootnote>? footnotesById,
+    this.measurer,
   })  : fontManager = fontManager ?? PdfFontManager(),
         footnotesById = footnotesById ?? const {};
 
@@ -212,6 +240,39 @@ class PdfLayoutEngine {
               remainingHeight = contentHeight;
             }
           }
+        } else if (node is DocxList && measurer != null) {
+          // Split long lists between items so they continue on the next
+          // page instead of being drawn past the bottom margin.
+          if (currentPage.isNotEmpty && remainingHeight < baseFontSize * 2) {
+            pages.add(currentPage);
+            currentPage = [];
+            remainingHeight = contentHeight;
+          }
+          var remainder = node;
+          while (remainder.items.isNotEmpty) {
+            final split =
+                measurer!.splitList(remainder, contentWidth, remainingHeight);
+            final fitted = split.first;
+            if (fitted.items.isEmpty) {
+              if (currentPage.isEmpty) {
+                currentPage.add(remainder);
+                remainingHeight -= measureList(remainder);
+                break;
+              }
+              pages.add(currentPage);
+              currentPage = [];
+              remainingHeight = contentHeight;
+              continue;
+            }
+            currentPage.add(fitted);
+            remainingHeight -= measureList(fitted);
+            remainder = split.last;
+            if (remainder.items.isNotEmpty) {
+              pages.add(currentPage);
+              currentPage = [];
+              remainingHeight = contentHeight;
+            }
+          }
         } else {
           // Not a paragraph or table (e.g. image)
           if (currentPage.isNotEmpty) {
@@ -326,7 +387,9 @@ class PdfLayoutEngine {
       if (footnote == null) continue;
       for (final block in footnote.content) {
         if (block is DocxParagraph) {
-          height += measureParagraphInWidth(block, contentWidth - 20);
+          height += measurer != null
+              ? measurer!.measureParagraph(block, contentWidth)
+              : measureParagraphInWidth(block, contentWidth - 20);
         }
       }
     }
@@ -342,7 +405,10 @@ class PdfLayoutEngine {
     } else if (node is DocxList) {
       return measureList(node);
     } else if (node is DocxImage) {
-      return node.height + 10;
+      final scale = node.width > contentWidth && node.width > 0
+          ? contentWidth / node.width
+          : 1.0;
+      return node.height * scale + 10;
     } else if (node is DocxDropCap) {
       return _measureDropCap(node);
     } else if (node is DocxTableOfContents) {
@@ -356,6 +422,8 @@ class PdfLayoutEngine {
 
   /// Measures paragraph height including line wrapping.
   double measureParagraph(DocxParagraph paragraph) {
+    final m = measurer;
+    if (m != null) return m.measureParagraph(paragraph, contentWidth);
     final fontSize =
         _effectiveFontSize(paragraph, getFontSize(paragraph.styleId));
     final lineHeight = fontSize * 1.4;
@@ -499,14 +567,34 @@ class PdfLayoutEngine {
       final n = gridColumns.length;
       return List<double>.filled(n, contentWidth / n);
     }
-    return gridColumns.map((w) => w / totalGridTwips * contentWidth).toList();
+    // Keep the table's real width (Word doesn't stretch narrower tables),
+    // honour percentage widths, and only shrink tables wider than the page.
+    var target = totalGridTwips / 20.0;
+    if (table.widthType == DocxWidthType.pct && (table.width ?? 0) > 0) {
+      target = contentWidth * table.width! / 5000.0;
+    } else if (table.widthType == DocxWidthType.dxa && (table.width ?? 0) > 0) {
+      target = table.width! / 20.0;
+    }
+    if (target > contentWidth) target = contentWidth;
+    return gridColumns.map((w) => w / totalGridTwips * target).toList();
+  }
+
+  /// Horizontal offset of a table within the content area, from its
+  /// alignment (tables narrower than the page can be centered/right).
+  double tableOffset(DocxTable table, List<double> colWidths) {
+    final width = colWidths.fold<double>(0, (a, b) => a + b);
+    final slack = contentWidth - width;
+    if (slack <= 0) return 0;
+    if (table.alignment == DocxAlign.center) return slack / 2;
+    if (table.alignment == DocxAlign.right) return slack;
+    return 0;
   }
 
   /// Measures a row's height given each column's width in points, accounting
   /// for colSpan (a cell's available width is the sum of the columns it
   /// spans).
   double measureRowHeight(DocxTableRow row, List<double> colWidths) {
-    var maxRowHeight = 20.0;
+    var maxRowHeight = measurer != null ? (row.height ?? 0) / 20.0 : 20.0;
     var colIndex = 0;
     for (final cell in row.cells) {
       var spanWidth = 0.0;
@@ -516,7 +604,8 @@ class PdfLayoutEngine {
         spanWidth += colWidths[colIndex + j];
       }
       if (spanWidth <= 0) spanWidth = contentWidth;
-      final cellHeight = measureCell(cell, spanWidth - 4);
+      final cellHeight =
+          measureCell(cell, measurer != null ? spanWidth : spanWidth - 4);
       if (cellHeight > maxRowHeight) maxRowHeight = cellHeight;
       colIndex += cell.colSpan;
     }
@@ -572,6 +661,8 @@ class PdfLayoutEngine {
 
   /// Measures cell height.
   double measureCell(DocxTableCell cell, double width) {
+    final m = measurer;
+    if (m != null) return m.measureCell(cell, width);
     double height = 0;
     for (final block in cell.children) {
       if (block is DocxParagraph) {
@@ -623,6 +714,8 @@ class PdfLayoutEngine {
 
   /// Measures list height.
   double measureList(DocxList list) {
+    final m = measurer;
+    if (m != null) return m.measureList(list, contentWidth);
     double height = 0;
     for (final item in list.items) {
       height += measureListItem(item, list.style);
@@ -685,7 +778,8 @@ class PdfLayoutEngine {
   /// the overflow spill into whatever was drawn next.
   String? _fallbackFontRefFor(List<DocxInline> children) {
     for (final child in children) {
-      if (child is DocxText && fontManager.needsUnicodeFallback(child.content)) {
+      if (child is DocxText &&
+          fontManager.needsUnicodeFallback(child.content)) {
         return fontManager.fallbackUnicodeFontRef;
       }
     }
@@ -695,9 +789,22 @@ class PdfLayoutEngine {
   /// Gets font size for a style.
   double getFontSize(String? styleId) {
     if (styleId == null) return baseFontSize.toDouble();
-    if (styleId.startsWith('Heading1')) return baseFontSize * 2.0;
-    if (styleId.startsWith('Heading2')) return baseFontSize * 1.5;
-    if (styleId.startsWith('Heading')) return baseFontSize * 1.3;
+    // Relative sizes mirroring the DOCX heading styles this package writes
+    // (Heading1 24pt, Heading2 20pt, Heading3 16pt at a 12pt base).
+    const headingScale = {
+      'Heading1': 2.0,
+      'Heading2': 1.67,
+      'Heading3': 1.33,
+      'Heading4': 1.17,
+      'Heading5': 1.0,
+      'Heading6': 0.92,
+      'Title': 2.33,
+      'Subtitle': 1.25,
+    };
+    for (final entry in headingScale.entries) {
+      if (styleId == entry.key) return baseFontSize * entry.value;
+    }
+    if (styleId.startsWith('Heading')) return baseFontSize * 1.17;
     return baseFontSize.toDouble();
   }
 
@@ -716,6 +823,10 @@ class PdfLayoutEngine {
   /// fixed.
   List<DocxParagraph> _splitParagraph(
       DocxParagraph paragraph, double availableHeight) {
+    final m = measurer;
+    if (m != null) {
+      return m.splitParagraph(paragraph, contentWidth, availableHeight);
+    }
     final fontSize =
         _effectiveFontSize(paragraph, getFontSize(paragraph.styleId));
     final lineHeight = fontSize * 1.4;
@@ -895,10 +1006,12 @@ class PdfLayoutEngine {
       final words = para.split(' ');
       var currentLineWidth = 0.0;
       var lines = 1;
-      final spaceWidth = fontManager.measureText(' ', fontSize, fontRef: fontRef);
+      final spaceWidth =
+          fontManager.measureText(' ', fontSize, fontRef: fontRef);
 
       for (final word in words) {
-        final wordWidth = fontManager.measureText(word, fontSize, fontRef: fontRef);
+        final wordWidth =
+            fontManager.measureText(word, fontSize, fontRef: fontRef);
 
         // A word wider than the whole line will be split across multiple
         // lines by the renderer (see PdfExporter._splitOverlongWords) -
@@ -935,8 +1048,8 @@ class PdfLayoutEngine {
   /// can differ per output line (`widthForLine(lineIndex)`) — used by
   /// [_measureDropCap] since the lines beside the drop cap letter are
   /// narrower than the ones below it.
-  int _wrapTextVariableWidth(String text, double fontSize,
-      double Function(int lineIndex) widthForLine,
+  int _wrapTextVariableWidth(
+      String text, double fontSize, double Function(int lineIndex) widthForLine,
       {String? fontRef}) {
     final paragraphs = text.split('\n');
     int totalLines = 0;
@@ -950,10 +1063,12 @@ class PdfLayoutEngine {
       final words = para.split(' ');
       var currentLineWidth = 0.0;
       var lines = 1;
-      final spaceWidth = fontManager.measureText(' ', fontSize, fontRef: fontRef);
+      final spaceWidth =
+          fontManager.measureText(' ', fontSize, fontRef: fontRef);
 
       for (final word in words) {
-        final wordWidth = fontManager.measureText(word, fontSize, fontRef: fontRef);
+        final wordWidth =
+            fontManager.measureText(word, fontSize, fontRef: fontRef);
         final availableWidth = widthForLine(totalLines + lines - 1);
 
         if (wordWidth > availableWidth && availableWidth > 0) {

@@ -53,7 +53,8 @@ class HtmlBlockParser {
           (node is dom.Element && !isBlockTag(node.localName?.toLowerCase()));
 
       if (isLooseInline) {
-        inlineBuffer.addAll(await _inlineParser.parseInline(node, context: ctx));
+        inlineBuffer
+            .addAll(await _inlineParser.parseInline(node, context: ctx));
         continue;
       }
 
@@ -93,8 +94,11 @@ class HtmlBlockParser {
     final tag = element.localName?.toLowerCase();
     if (tag == null) return [];
 
-    final styleStr =
+    var styleStr =
         context.mergeStyles(element.attributes['style'], element.classes);
+    // Legacy `align="center"` behaves like a low-priority text-align.
+    final alignAttr = element.attributes['align'];
+    if (alignAttr != null) styleStr = '$styleStr;text-align:$alignAttr';
     final parentCtx = styleContext ?? const HtmlStyleContext();
     final currentCtx =
         parentCtx.mergeWith(tag, styleStr, ColorUtils.parseColor);
@@ -168,6 +172,10 @@ class HtmlBlockParser {
             indentLeft: blockStyles.indentLeft,
             indentRight: blockStyles.indentRight,
             indentFirstLine: blockStyles.indentFirstLine,
+            spacingBefore: blockStyles.spacingBefore,
+            spacingAfter: blockStyles.spacingAfter,
+            lineSpacing: blockStyles.lineSpacing,
+            lineRule: blockStyles.lineRule,
           )
         ];
 
@@ -220,6 +228,10 @@ class HtmlBlockParser {
               indentRight: blockStyles.indentRight ?? built.indentRight,
               indentFirstLine:
                   blockStyles.indentFirstLine ?? built.indentFirstLine,
+              spacingBefore: blockStyles.spacingBefore,
+              spacingAfter: blockStyles.spacingAfter,
+              lineSpacing: blockStyles.lineSpacing,
+              lineRule: blockStyles.lineRule,
             )
           ];
         }
@@ -235,6 +247,10 @@ class HtmlBlockParser {
             indentLeft: blockStyles.indentLeft,
             indentRight: blockStyles.indentRight,
             indentFirstLine: blockStyles.indentFirstLine,
+            spacingBefore: blockStyles.spacingBefore,
+            spacingAfter: blockStyles.spacingAfter,
+            lineSpacing: blockStyles.lineSpacing,
+            lineRule: blockStyles.lineRule,
           )
         ];
     }
@@ -292,6 +308,7 @@ class HtmlBlockParser {
 
   HtmlBlockStyles _parseBlockStyles(String style) {
     String? shadingFill;
+    final lineHeight = _parseLineHeight(style);
     DocxAlign align = DocxAlign.left;
 
     final bgMatch = RegExp(
@@ -305,9 +322,27 @@ class HtmlBlockParser {
       }
     }
 
-    final alignMatch =
-        RegExp(r'text-align\s*:\s*(\w+)', caseSensitive: false)
-            .firstMatch(style);
+    // `background: #eee url(...) no-repeat` shorthand: use its color.
+    if (shadingFill == null) {
+      final shorthand = RegExp(r'(?<![-a-zA-Z])background\s*:\s*([^;]+)',
+              caseSensitive: false)
+          .firstMatch(style)
+          ?.group(1);
+      if (shorthand != null) {
+        for (final token in shorthand
+            .replaceAll(RegExp(r'url\([^)]*\)'), ' ')
+            .split(RegExp(r'\s+(?![^(]*\))'))) {
+          final hex = token.isEmpty ? null : ColorUtils.parseColor(token);
+          if (hex != null) {
+            shadingFill = hex;
+            break;
+          }
+        }
+      }
+    }
+
+    final alignMatch = RegExp(r'text-align\s*:\s*(\w+)', caseSensitive: false)
+        .firstMatch(style);
     switch (alignMatch?.group(1)?.toLowerCase()) {
       case 'center':
         align = DocxAlign.center;
@@ -336,7 +371,44 @@ class HtmlBlockParser {
       indentRight: _lengthPropertyTwips(style, 'margin-right') ??
           _lengthPropertyTwips(style, 'padding-right'),
       indentFirstLine: _lengthPropertyTwips(style, 'text-indent'),
+      spacingBefore: _lengthPropertyTwips(style, 'margin-top') ??
+          _marginShorthandTwips(style, top: true),
+      spacingAfter: _lengthPropertyTwips(style, 'margin-bottom') ??
+          _marginShorthandTwips(style, top: false),
+      lineSpacing: lineHeight?.$1,
+      lineRule: lineHeight?.$2,
     );
+  }
+
+  /// Vertical component of a CSS `margin` shorthand, in twips.
+  int? _marginShorthandTwips(String style, {required bool top}) {
+    final match =
+        RegExp(r'(?<![-a-zA-Z])margin\s*:\s*([^;]+)', caseSensitive: false)
+            .firstMatch(style);
+    if (match == null) return null;
+    final parts = match.group(1)!.trim().split(RegExp(r'\s+'));
+    final value = top ? parts[0] : (parts.length >= 3 ? parts[2] : parts[0]);
+    if (value.toLowerCase() == 'auto') return null;
+    final points = ColorUtils.parseCssLengthToPoints(value);
+    return points != null ? (points * 20).round() : null;
+  }
+
+  /// CSS `line-height` as DOCX line spacing: unitless/percent values are
+  /// proportional (`auto`, 240 = single), lengths are a minimum height.
+  (int, String)? _parseLineHeight(String style) {
+    final match = RegExp(r'line-height\s*:\s*([\d.]+)\s*(px|pt|em|rem|%)?',
+            caseSensitive: false)
+        .firstMatch(style);
+    if (match == null) return null;
+    final number = double.tryParse(match.group(1)!);
+    if (number == null || number <= 0) return null;
+    final unit = match.group(2)?.toLowerCase();
+    if (unit == null) return ((number * 240).round(), 'auto');
+    if (unit == '%') return ((number / 100 * 240).round(), 'auto');
+    if (unit == 'em' || unit == 'rem') return ((number * 240).round(), 'auto');
+    final points = ColorUtils.parseCssLengthToPoints('$number$unit');
+    if (points == null) return null;
+    return ((points * 20).round(), 'atLeast');
   }
 
   /// Reads a CSS length property (e.g. `margin-left: 40px`) and converts it

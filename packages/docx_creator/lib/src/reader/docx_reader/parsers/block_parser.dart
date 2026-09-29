@@ -250,7 +250,12 @@ class BlockParser {
             imageBulletBytes: levelDef.picBulletImage,
             bullet: levelDef.bulletChar ?? '•',
             numberFormat: format,
-            indentPerLevel: levelDef.indentLeft ?? 720,
+            // `w:ind w:left` is the level's absolute indent, while
+            // DocxListStyle.indentPerLevel is multiplied by (level + 1)
+            // wherever it's applied (DOCX writer, PDF exporter).
+            indentPerLevel: levelDef.indentLeft != null
+                ? (levelDef.indentLeft! / (level + 1)).round()
+                : 720,
             hangingIndent: levelDef.hanging ?? 360,
             themeColor: levelDef.themeColor,
             themeTint: levelDef.themeTint,

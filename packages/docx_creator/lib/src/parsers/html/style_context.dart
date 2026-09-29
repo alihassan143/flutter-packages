@@ -161,7 +161,8 @@ class HtmlStyleContext {
         final value = fontWeightMatch.group(1)!.toLowerCase();
         final numericWeight = int.tryParse(value);
         // Word (and browsers) render 600+ as visually bold.
-        final isBold = value == 'bold' || (numericWeight != null && numericWeight >= 600);
+        final isBold =
+            value == 'bold' || (numericWeight != null && numericWeight >= 600);
         if (isBold) ctx = ctx.copyWith(fontWeight: DocxFontWeight.bold);
       }
 
@@ -190,10 +191,10 @@ class HtmlStyleContext {
         }
       }
 
-      final sizeMatch =
-          RegExp(r'font-size\s*:\s*([\d.]+\s*(?:px|pt|em|rem|%)?)',
-                  caseSensitive: false)
-              .firstMatch(style);
+      final sizeMatch = RegExp(
+              r'font-size\s*:\s*([\d.]+\s*(?:px|pt|em|rem|%)?)',
+              caseSensitive: false)
+          .firstMatch(style);
       if (sizeMatch != null) {
         final fs = ColorUtils.parseCssLengthToPoints(sizeMatch.group(1)!);
         if (fs != null) ctx = ctx.copyWith(fontSize: fs);
@@ -210,6 +211,21 @@ class HtmlStyleContext {
           final hex = colorParser(val);
           if (hex != null) ctx = ctx.copyWith(colorHex: hex);
         }
+      }
+
+      final transform =
+          RegExp(r'text-transform\s*:\s*([a-z-]+)', caseSensitive: false)
+              .firstMatch(style)
+              ?.group(1)
+              ?.toLowerCase();
+      if (transform == 'uppercase') {
+        ctx = ctx.copyWith(isAllCaps: true);
+      } else if (transform == 'none' || transform == 'lowercase') {
+        ctx = ctx.copyWith(isAllCaps: false);
+      }
+      if (RegExp(r'font-variant\s*:\s*small-caps', caseSensitive: false)
+          .hasMatch(style)) {
+        ctx = ctx.copyWith(isSmallCaps: true);
       }
 
       // Background Color (Shading)
@@ -276,7 +292,19 @@ class HtmlBlockStyles {
   /// First-line indentation in twips, from CSS `text-indent`.
   final int? indentFirstLine;
 
+  /// Space before/after in twips, from CSS `margin-top`/`margin-bottom`.
+  final int? spacingBefore;
+  final int? spacingAfter;
+
+  /// Line spacing (`w:spacing w:line`/`w:lineRule`) from CSS `line-height`.
+  final int? lineSpacing;
+  final String? lineRule;
+
   HtmlBlockStyles({
+    this.spacingBefore,
+    this.spacingAfter,
+    this.lineSpacing,
+    this.lineRule,
     this.shadingFill,
     this.colorHex,
     this.align = DocxAlign.left,

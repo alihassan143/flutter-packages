@@ -127,8 +127,42 @@ class HtmlTableParser {
       colorHex: colorHex,
     );
 
+    // Cell text-align (CSS or legacy `align`) applies to paragraphs that
+    // don't set their own; header cells are centered like in browsers.
+    final alignValue = RegExp(r'text-align\s*:\s*(\w+)', caseSensitive: false)
+            .firstMatch(style)
+            ?.group(1)
+            ?.toLowerCase() ??
+        td.attributes['align']?.toLowerCase() ??
+        (td.localName == 'th' ? 'center' : null);
+    final cellAlign = switch (alignValue) {
+      'center' => DocxAlign.center,
+      'right' || 'end' => DocxAlign.right,
+      'justify' => DocxAlign.justify,
+      _ => null,
+    };
+    final alignedContent = cellAlign == null
+        ? content
+        : content
+            .map((b) => b is DocxParagraph && b.align == DocxAlign.left
+                ? b.copyWith(align: cellAlign)
+                : b)
+            .toList();
+
+    final valign = (RegExp(r'vertical-align\s*:\s*(\w+)', caseSensitive: false)
+                .firstMatch(style)
+                ?.group(1) ??
+            td.attributes['valign'])
+        ?.toLowerCase();
+    final verticalAlign = switch (valign) {
+      'top' => DocxVerticalAlign.top,
+      'bottom' => DocxVerticalAlign.bottom,
+      _ => DocxVerticalAlign.center,
+    };
+
     return DocxTableCell(
-      children: content,
+      children: alignedContent,
+      verticalAlign: verticalAlign,
       colSpan: colSpan,
       rowSpan: rowSpan,
       shadingFill: shadingFill,
@@ -173,8 +207,8 @@ class HtmlTableParser {
         colorHex: colorHex,
         fontWeight: isHeader ? DocxFontWeight.bold : DocxFontWeight.normal,
       );
-      final results = await blockParser!
-          .parseChildren(nodes, styleContext: seedContext);
+      final results =
+          await blockParser!.parseChildren(nodes, styleContext: seedContext);
       return results.whereType<DocxBlock>().toList();
     }
     final blocks = <DocxBlock>[];

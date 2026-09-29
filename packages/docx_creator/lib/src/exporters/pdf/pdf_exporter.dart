@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:math' show pi, cos, sin;
 import 'dart:typed_data';
 
@@ -15,7 +16,7 @@ import 'pdf_layout_engine.dart';
 /// - Layout and measurement ([PdfLayoutEngine])
 /// - Content stream building ([PdfContentBuilder])
 /// - Low-level PDF structure ([PdfDocumentWriter])
-class PdfExporter {
+class PdfExporter implements PdfBlockMeasurer {
   /// Default page width (Letter: 8.5 inches = 612 points)
   final double pageWidth;
 
@@ -195,7 +196,9 @@ class PdfExporter {
       baseFontSize: fontSize.toDouble(),
       fontManager: _fontManager,
       footnotesById: footnotesById,
+      measurer: this,
     );
+    _layoutEngine = layout;
 
     final paginationResult = layout.paginateWithFootnotes(section.nodes);
     final pages = paginationResult.pages;
@@ -435,8 +438,8 @@ class PdfExporter {
   /// through a narrower column to its right for those lines, then returns to
   /// full paragraph width — unlike Word's `w:framePr`-floated letter, PDF has
   /// no native float primitive, so this hand-flows lines through variable
-  /// per-line widths ([_flowWordsVariableWidth]) instead of the earlier
-  /// approach of concatenating letter + text into one oversized paragraph.
+  /// per-line widths ([_flowLines]) instead of the earlier approach of
+  /// concatenating letter + text into one oversized paragraph.
   double _renderDropCap(
     DocxDropCap dropCap,
     PdfContentBuilder builder,
@@ -459,25 +462,16 @@ class PdfExporter {
     final dropCapBlockHeight = dropCap.lines * dropCapLineHeight;
 
     final words =
-        _collectWords(dropCap.restOfParagraph, builder, baseFontSize, false);
-    final spaceWidth = baseFontSize * 0.278;
+        _collectWords(dropCap.restOfParagraph, baseFontSize, register: true);
     // Split against the narrower of the two widths so a long word can never
     // overflow either the column beside the drop cap letter or the
     // full-width lines below it.
     final splitWidth = narrowWidth > 0 ? narrowWidth : maxWidth;
-    final splitWords =
-        _splitOverlongWords(words, splitWidth, baseFontSize, builder);
-    final lines = _flowWordsVariableWidth(
-        splitWords, spaceWidth,
-        (i) => i < dropCap.lines ? narrowWidth : maxWidth);
-
-    final lineHeights = <double>[];
+    final splitWords = _splitOverlongWords(words, splitWidth, baseFontSize);
+    final lines = _flowLines(
+        splitWords, (i) => i < dropCap.lines ? narrowWidth : maxWidth);
     for (final line in lines) {
-      if (line.isEmpty) {
-        lineHeights.add(dropCapLineHeight);
-        continue;
-      }
-      lineHeights.add(_lineHeightFor(line, baseFontSize));
+      _measureLine(line, baseFontSize, const DocxParagraph(children: []));
     }
 
     // Draw the drop cap letter so its glyph roughly fills the block of
@@ -490,38 +484,29 @@ class PdfExporter {
     builder.endText();
 
     final decorations = <_TextDecoration>[];
-    var lineY = y - baseFontSize;
+    var lineTop = y;
     for (var i = 0; i < lines.length; i++) {
       final line = lines[i];
-      final currentLineHeight = lineHeights[i];
-      if (line.isNotEmpty) {
+      if (line.words.isNotEmpty) {
         final narrow = i < dropCap.lines;
         _drawWordLine(
           builder: builder,
           line: line,
           startX: narrow ? x + dropCapWidth + hGap : x,
           lineMaxWidth: narrow ? narrowWidth : maxWidth,
-          y: lineY,
-          fontSize: baseFontSize,
-          spaceWidth: spaceWidth,
+          y: lineTop - line.baseline,
           align: DocxAlign.left,
-          isLastLine: i == lines.length - 1,
+          justify: false,
           decorations: decorations,
         );
       }
-      lineY -= currentLineHeight;
+      lineTop -= line.height;
     }
 
-    for (final dec in decorations) {
-      builder.saveState();
-      builder.setStrokeColorHex(dec.color);
-      builder.drawLine(dec.x, dec.y, dec.x + dec.width, dec.y, lineWidth: 0.5);
-      builder.restoreState();
-    }
+    _strokeDecorations(builder, decorations);
 
-    final textBottom = lineY;
     final dropCapBottom = y - dropCapBlockHeight;
-    final finalY = textBottom < dropCapBottom ? textBottom : dropCapBottom;
+    final finalY = lineTop < dropCapBottom ? lineTop : dropCapBottom;
     return finalY - baseFontSize * 0.5;
   }
 
@@ -731,82 +716,110 @@ class PdfExporter {
     builder.drawPolygon(vertices, stroke: stroke, fill: fill);
   }
 
-  double _renderParagraph(
+  // ===========================================================================
+  // Paragraph layout
+  //
+  // Measuring (pagination) and drawing share [_layoutParagraph], so a
+  // paragraph always occupies exactly the height pagination reserved for it.
+  // ===========================================================================
+
+  /// Lays out [paragraph] in a box [boxWidth] points wide (before the
+  /// paragraph's own indents/padding). [kind] picks the default spacing
+  /// used when the paragraph doesn't specify any. With [register] false,
+  /// inline images are measured but not added to the PDF (dry run).
+  _ParaLayout _layoutParagraph(
     DocxParagraph paragraph,
-    PdfContentBuilder builder,
-    double startX,
-    double startY,
-    PdfLayoutEngine layout,
-  ) {
-    final fontSize = layout.getFontSize(paragraph.styleId);
-    final lineHeight = fontSize * 1.4;
-    final indent = (paragraph.indentLeft ?? 0) / 20.0;
-    final indentRight = (paragraph.indentRight ?? 0) / 20.0;
-
-    final paddingLeft = (paragraph.paddingLeft ?? 0) / 20.0;
-    final paddingRight = (paragraph.paddingRight ?? 0) / 20.0;
-    final paddingTop = (paragraph.paddingTop ?? 0) / 20.0;
-    final paddingBottom = (paragraph.paddingBottom ?? 0) / 20.0;
-
-    final maxWidth =
-        layout.contentWidth - indent - indentRight - paddingLeft - paddingRight;
-
-    // Collect words with their formatting
+    double boxWidth, {
+    _ParaKind kind = _ParaKind.body,
+    double? fontSizeOverride,
+    bool register = false,
+  }) {
+    final layout = _layoutEngine;
+    final fontSize =
+        fontSizeOverride ?? layout?.getFontSize(paragraph.styleId) ?? fontSize0;
     final isHeading = paragraph.styleId?.startsWith('Heading') ?? false;
-    var words = _collectWords(paragraph.children, builder, fontSize, isHeading);
-    words = _splitOverlongWords(words, maxWidth, fontSize, builder);
 
-    // Flow words into lines - use proper Helvetica space width (0.278)
-    final spaceWidth = fontSize * 0.278;
-    final lines = _flowWords(words, maxWidth, spaceWidth);
+    final indentLeft = (paragraph.indentLeft ?? 0) / 20.0;
+    final indentRight = (paragraph.indentRight ?? 0) / 20.0;
+    final firstLine = (paragraph.indentFirstLine ?? 0) / 20.0;
+    final padLeft = (paragraph.paddingLeft ?? 0) / 20.0;
+    final padRight = (paragraph.paddingRight ?? 0) / 20.0;
+    final padTop = (paragraph.paddingTop ?? 0) / 20.0;
+    final padBottom = (paragraph.paddingBottom ?? 0) / 20.0;
+    final textWidth =
+        math.max(1.0, boxWidth - indentLeft - indentRight - padLeft - padRight);
 
-    // Track decoration positions for drawing after text
-    final decorations = <_TextDecoration>[];
-
-    // Calculate per-line heights based on max font size in each line (and
-    // any inline image/shape taller than the text, so the cursor advances
-    // far enough to clear it instead of overlapping whatever is drawn next
-    // - see [_lineHeightFor]).
-    final lineHeights = <double>[];
-    for (final line in lines) {
-      if (line.isEmpty) {
-        lineHeights.add(lineHeight);
-      } else {
-        lineHeights.add(_lineHeightFor(line, fontSize));
+    double spaceBefore;
+    double spaceAfter;
+    if (paragraph.spacingBefore != null) {
+      spaceBefore = paragraph.spacingBefore! / 20.0;
+    } else {
+      // Headings get a little room above them, like Word's heading styles.
+      spaceBefore = kind == _ParaKind.body && isHeading ? fontSize * 0.5 : 0;
+    }
+    if (paragraph.spacingAfter != null) {
+      spaceAfter = paragraph.spacingAfter! / 20.0;
+    } else {
+      switch (kind) {
+        case _ParaKind.body:
+          spaceAfter = isHeading ? fontSize * 0.8 : fontSize * 0.5;
+        case _ParaKind.cell:
+          spaceAfter = 0;
+        case _ParaKind.listItem:
+          spaceAfter = fontSize * 0.25;
       }
     }
 
-    // Calculate total height for paragraph background
-    final totalParagraphHeight =
-        lineHeights.fold<double>(0, (sum, h) => sum + h) +
-            paddingTop +
-            paddingBottom;
+    var words = _collectWords(paragraph.children, fontSize,
+        forceBold: isHeading, register: register);
+    words = _splitOverlongWords(
+        words, textWidth - math.max(0, firstLine), fontSize);
+    final lines =
+        _flowLines(words, (i) => i == 0 ? textWidth - firstLine : textWidth);
+    for (final line in lines) {
+      _measureLine(line, fontSize, paragraph);
+    }
 
-    // Draw paragraph background (use full width for code blocks etc.)
+    return _ParaLayout(
+      paragraph: paragraph,
+      fontSize: fontSize,
+      lines: lines,
+      spaceBefore: spaceBefore,
+      spaceAfter: spaceAfter,
+      padTop: padTop,
+      padBottom: padBottom,
+      padLeft: padLeft,
+      padRight: padRight,
+      indentLeft: indentLeft,
+      firstLineIndent: firstLine,
+      textWidth: textWidth,
+    );
+  }
+
+  /// Draws a laid-out paragraph whose box's top-left is at ([x], [yTop]);
+  /// returns the y just below it (after its spacing).
+  double _drawParagraph(
+      _ParaLayout pl, PdfContentBuilder builder, double x, double yTop) {
+    final paragraph = pl.paragraph;
+    final boxTop = yTop - pl.spaceBefore;
+    final boxHeight = pl.padTop + pl.linesHeight + pl.padBottom;
+    final boxLeft = x + pl.indentLeft;
+    final boxWidth = pl.textWidth + pl.padLeft + pl.padRight;
+
     if (paragraph.shadingFill != null && paragraph.shadingFill != 'auto') {
       builder.saveState();
       builder.setFillColorHex(paragraph.shadingFill!);
-      final bgBottom = startY - totalParagraphHeight;
-      // Background covers indent + padding + text width + padding
-      // But standard Word behavior suggests background covers the entire block width INCLUDING indent?
-      // Actually, shading usually applies to the text box.
-      // If we want FULL shading, we might strictly use (maxWidth + paddingLeft + paddingRight).
-      // Let's stick to the box model we built: indent implies empty space outside.
-      builder.fillRect(startX + indent, bgBottom,
-          maxWidth + paddingLeft + paddingRight, totalParagraphHeight);
+      builder.fillRect(boxLeft, boxTop - boxHeight, boxWidth, boxHeight);
       builder.restoreState();
     }
 
-    // Draw paragraph borders (e.g. <hr>/blockquote/code-block rules), which
-    // were previously only used to derive spacing and never actually drawn.
+    // Paragraph borders (e.g. <hr>/blockquote/code-block rules).
     if (paragraph.borderTop != null ||
         paragraph.borderBottomSide != null ||
         paragraph.borderLeft != null ||
         paragraph.borderRight != null) {
-      final boxLeft = startX + indent;
-      final boxRight = startX + indent + maxWidth + paddingLeft + paddingRight;
-      final boxTop = startY;
-      final boxBottom = startY - totalParagraphHeight;
+      final boxRight = boxLeft + boxWidth;
+      final boxBottom = boxTop - boxHeight;
 
       void drawSide(
           DocxBorderSide? side, double x1, double y1, double x2, double y2) {
@@ -825,85 +838,95 @@ class PdfExporter {
       drawSide(paragraph.borderRight, boxRight, boxTop, boxRight, boxBottom);
     }
 
-    // Render lines (adjust Y for padding)
-    // Baseline should be approx 1em down from top to fit text inside the line height
-    var y = startY - paddingTop - fontSize;
-
-    for (var i = 0; i < lines.length; i++) {
-      final line = lines[i];
-      final currentLineHeight = lineHeights[i];
-
-      if (line.isEmpty) {
-        y -= currentLineHeight;
-        continue;
+    final decorations = <_TextDecoration>[];
+    var lineTop = boxTop - pl.padTop;
+    for (var i = 0; i < pl.lines.length; i++) {
+      final line = pl.lines[i];
+      if (line.words.isNotEmpty) {
+        final first = i == 0 ? pl.firstLineIndent : 0.0;
+        // Justified text leaves the paragraph's last line and lines ended
+        // by a hard break ragged, like Word.
+        final isLast = i == pl.lines.length - 1 || pl.lines[i + 1].afterBreak;
+        _drawWordLine(
+          builder: builder,
+          line: line,
+          startX: boxLeft + pl.padLeft + first,
+          lineMaxWidth: pl.textWidth - first,
+          y: lineTop - line.baseline,
+          align: paragraph.align,
+          justify: paragraph.align == DocxAlign.justify && !isLast,
+          decorations: decorations,
+        );
       }
-
-      _drawWordLine(
-        builder: builder,
-        line: line,
-        startX: startX + indent + paddingLeft,
-        lineMaxWidth: maxWidth,
-        y: y,
-        fontSize: fontSize,
-        spaceWidth: spaceWidth,
-        align: paragraph.align,
-        isLastLine: i == lines.length - 1,
-        decorations: decorations,
-      );
-
-      // Move to next line
-      y -= currentLineHeight;
+      lineTop -= line.height;
     }
-
     _strokeDecorations(builder, decorations);
 
-    if (lines.isEmpty) y = startY - lineHeight;
-
-    // Add extra spacing after paragraphs (especially headings)
-    final spacing = isHeading ? fontSize * 0.8 : fontSize * 0.5;
-    return y - spacing;
+    return boxTop - boxHeight - pl.spaceAfter;
   }
 
-  /// Height a flowed line needs to draw without clipping/overlapping
-  /// whatever comes next: the tallest text run on the line (`fontSize *
-  /// 1.4`, matching every other line-height computation in this file), or
-  /// an inline image/shape's own height when that's taller. Inline images
-  /// and shapes carry no [_Word.fontSize] (they're not text), so a plain
-  /// max-of-fontSize scan silently ignores them - previously the line
-  /// advance after a line containing e.g. a badge icon or inline shape used
-  /// only the text line height, leaving the cursor far short of clearing
-  /// the image and causing every following line/paragraph to be drawn on
-  /// top of it.
-  double _lineHeightFor(List<_Word> line, double fontSize) {
-    var maxFontInLine = fontSize;
-    var maxBlockHeight = 0.0;
-    for (final word in line) {
-      final wordFontSize = (word.fontSize ?? fontSize).toDouble();
-      if (wordFontSize > maxFontInLine) maxFontInLine = wordFontSize;
+  double _renderParagraph(
+    DocxParagraph paragraph,
+    PdfContentBuilder builder,
+    double startX,
+    double startY,
+    PdfLayoutEngine layout,
+  ) {
+    final pl = _layoutParagraph(paragraph, layout.contentWidth, register: true);
+    return _drawParagraph(pl, builder, startX, startY);
+  }
+
+  /// Computes a line's height and baseline offset from the fonts, inline
+  /// media and the paragraph's line-spacing rule (`w:spacing w:line`).
+  void _measureLine(_Line line, double paraFontSize, DocxParagraph paragraph) {
+    var maxFont = 0.0;
+    var maxMedia = 0.0;
+    for (final word in line.words) {
       if (word.isImage) {
-        if (word.imageHeight > maxBlockHeight) maxBlockHeight = word.imageHeight;
+        maxMedia = math.max(maxMedia, word.imageHeight);
       } else if (word.isShape) {
-        final shapeHeight = word.shape!.height;
-        if (shapeHeight > maxBlockHeight) maxBlockHeight = shapeHeight;
+        maxMedia = math.max(maxMedia, word.shape!.height);
+      } else if (!word.isTab && !word.isBreak) {
+        maxFont = math.max(maxFont, word.fontSize ?? paraFontSize);
       }
     }
-    final textLineHeight = maxFontInLine * 1.4;
-    return maxBlockHeight > textLineHeight ? maxBlockHeight : textLineHeight;
+    if (maxFont == 0) maxFont = paraFontSize;
+
+    // Single spacing is ~1.22em for the fonts Word uses; the package's
+    // DOCX default (and a paragraph with no explicit rule) is 1.15 lines.
+    final single = maxFont * 1.22;
+    final rule = paragraph.lineRule ?? 'auto';
+    final value = paragraph.lineSpacing;
+    double height;
+    var exact = false;
+    if (value == null || value <= 0) {
+      height = single * 1.15;
+    } else if (rule == 'exact') {
+      height = value / 20.0;
+      exact = true;
+    } else if (rule == 'atLeast') {
+      height = math.max(value / 20.0, single);
+    } else {
+      height = single * value / 240.0;
+    }
+
+    var baseline = maxFont * 0.9;
+    if (maxMedia > 0) {
+      baseline = math.max(baseline, maxMedia);
+      if (!exact) height = math.max(height, maxMedia + maxFont * 0.3);
+    }
+    if (exact) baseline = math.min(baseline, height * 0.8);
+    line.height = height;
+    line.baseline = baseline;
   }
 
   /// Draws an invisible space glyph at [x] so a text extractor sees a word
   /// boundary between a non-text element (checkbox, image, shape) and the
-  /// word before/after it, not just a positional gap - [_drawWordLine]'s
-  /// plain-text branch already does this for two adjacent text words;
-  /// without this, e.g. a checkbox immediately followed by a text word
-  /// (`'☐ Task'`, a common task-list shape) reads as `'Task'` glued
-  /// straight onto the checkbox once extracted/copy-pasted. A blank
-  /// [fontRef] (line breaks, and this helper's own callers for images/
-  /// shapes, which have no real font of their own) has nothing sensible to
-  /// draw with and is a no-op.
-  void _drawGapSpace(
-      PdfContentBuilder builder, double x, double y, String fontRef,
-      double fontSize) {
+  /// word before/after it, not just a positional gap. A blank [fontRef]
+  /// (line breaks, images and shapes, which have no real font of their
+  /// own) has nothing sensible to draw with and is a no-op.
+  void _drawGapSpace(PdfContentBuilder builder, double x, double y,
+      String fontRef, double fontSize) {
     if (fontRef.isEmpty) return;
     builder.beginText();
     builder.setTextMatrix(x, y);
@@ -920,117 +943,112 @@ class PdfExporter {
     for (final dec in decorations) {
       builder.saveState();
       builder.setStrokeColorHex(dec.color);
-      builder.drawLine(dec.x, dec.y, dec.x + dec.width, dec.y, lineWidth: 0.5);
+      builder.drawLine(dec.x, dec.y, dec.x + dec.width, dec.y,
+          lineWidth: dec.thickness);
       builder.restoreState();
     }
   }
 
   /// Draws one already-flowed line of words (text, images, shapes,
-  /// checkboxes) at baseline [y], resolving [align] against [lineMaxWidth]
-  /// to find the line's starting x. Shared between [_renderParagraph] and
-  /// the drop cap's rest-of-paragraph flow ([_renderDropCap]) so both draw
-  /// words identically — the only difference between them is what width/x
-  /// each line gets, which the caller decides per line.
+  /// checkboxes) with its baseline at [y], resolving [align] against
+  /// [lineMaxWidth] to find the line's starting x.
   void _drawWordLine({
     required PdfContentBuilder builder,
-    required List<_Word> line,
+    required _Line line,
     required double startX,
     required double lineMaxWidth,
     required double y,
-    required double fontSize,
-    required double spaceWidth,
     required DocxAlign align,
-    required bool isLastLine,
+    required bool justify,
     required List<_TextDecoration> decorations,
   }) {
-    // Calculate max font size for this line for proper baseline positioning
-    var maxFontInLine = fontSize;
-    for (final word in line) {
-      final wordFontSize = (word.fontSize ?? fontSize).toDouble();
-      if (wordFontSize > maxFontInLine) maxFontInLine = wordFontSize;
+    final words = line.words;
+    var maxFontInLine = 0.0;
+    for (final word in words) {
+      if (word.isImage || word.isShape || word.isTab) continue;
+      maxFontInLine = math.max(maxFontInLine, word.fontSize ?? fontSize0);
     }
+    if (maxFontInLine == 0) maxFontInLine = fontSize0;
 
-    // Calculate alignment
+    final lead =
+        line.afterBreak && words.isNotEmpty ? words.first.lineStartGap : 0.0;
+    double gapBefore(int k) => k == 0 ? lead : words[k].gap;
+
     var lineWidth = 0.0;
-    for (var j = 0; j < line.length; j++) {
-      lineWidth += line[j].width;
-      if (j < line.length - 1 && !line[j + 1].glueToPrevious) {
-        lineWidth += spaceWidth;
-      }
+    for (var j = 0; j < words.length; j++) {
+      lineWidth += gapBefore(j) + words[j].width;
     }
 
     var x = startX;
-    var wordSpacing = 0.0;
-
+    var extraPerGap = 0.0;
     if (align == DocxAlign.center) {
       x += (lineMaxWidth - lineWidth) / 2;
     } else if (align == DocxAlign.right) {
       x += lineMaxWidth - lineWidth;
-    } else if (align == DocxAlign.justify && !isLastLine) {
-      var spaceCount = 0;
-      for (var j = 1; j < line.length; j++) {
-        if (!line[j].glueToPrevious) spaceCount++;
+    } else if (justify) {
+      var gaps = 0;
+      for (var j = 1; j < words.length; j++) {
+        if (words[j].gap > 0) gaps++;
       }
-      if (spaceCount > 0) {
-        final slack = lineMaxWidth - lineWidth;
-        if (slack > 0 && slack < fontSize * 2) {
-          wordSpacing = slack / spaceCount;
-        }
-      }
+      final slack = lineMaxWidth - lineWidth;
+      if (gaps > 0 && slack > 0) extraPerGap = slack / gaps;
     }
 
-    // First pass: draw text backgrounds
-    var bgX = x;
-    for (var k = 0; k < line.length; k++) {
-      final word = line[k];
-      if (!word.isTab && word.backgroundColor != null) {
-        final wordFontSize = (word.fontSize ?? fontSize).toDouble();
-        builder.saveState();
-        builder.setFillColorHex(word.backgroundColor!);
-        // Draw background rectangle behind word using word's font size
-        builder.fillRect(
-            bgX, y - wordFontSize * 0.2, word.width, wordFontSize * 1.2);
-        builder.restoreState();
-      }
-      bgX += word.width;
-      if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
-        bgX += spaceWidth + wordSpacing;
-      }
+    // Resolve every word's x first; spaces between two words that share an
+    // underline/highlight/link are covered too, as in Word and browsers.
+    final xs = List<double>.filled(words.length, 0);
+    var cursor = x;
+    for (var k = 0; k < words.length; k++) {
+      final g = gapBefore(k);
+      cursor += g + (k > 0 && words[k].gap > 0 ? extraPerGap : 0);
+      xs[k] = cursor;
+      cursor += words[k].width;
+    }
+    double spanTo(int k) =>
+        k + 1 < words.length ? xs[k + 1] : xs[k] + words[k].width;
+
+    // Backgrounds (highlight/shading) behind text.
+    for (var k = 0; k < words.length; k++) {
+      final word = words[k];
+      if (word.isTab || word.backgroundColor == null) continue;
+      final wordFontSize = word.fontSize ?? fontSize0;
+      final continues = k + 1 < words.length &&
+          words[k + 1].backgroundColor == word.backgroundColor;
+      final right = continues ? spanTo(k) : xs[k] + word.width;
+      builder.saveState();
+      builder.setFillColorHex(word.backgroundColor!);
+      builder.fillRect(
+          xs[k], y - wordFontSize * 0.22, right - xs[k], wordFontSize * 1.15);
+      builder.restoreState();
     }
 
-    // Second pass: draw text with manual position tracking
-    var textX = x;
-
-    for (var k = 0; k < line.length; k++) {
-      final word = line[k];
+    for (var k = 0; k < words.length; k++) {
+      final word = words[k];
+      final textX = xs[k];
+      final hasNext = k < words.length - 1 && words[k + 1].gap > 0;
 
       if (word.isTab) {
-        textX += word.width;
+        continue;
       } else if (word.isImage) {
-        final imgY = y - word.imageHeight * 0.8;
-        builder.drawImage(
-            word.imageXObjectName!, textX, imgY, word.width, word.imageHeight);
-        _drawImageBorder(builder, word.imageBorder, textX, imgY, word.width,
-            word.imageHeight);
-        textX += word.width;
-        if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
-          _drawGapSpace(
-              builder, textX, y, PdfFontManager.fontRegular, fontSize);
-          textX += spaceWidth + wordSpacing;
+        if (word.imageXObjectName != null) {
+          builder.drawImage(
+              word.imageXObjectName!, textX, y, word.width, word.imageHeight);
+          _drawImageBorder(builder, word.imageBorder, textX, y, word.width,
+              word.imageHeight);
+        }
+        if (hasNext) {
+          _drawGapSpace(builder, textX + word.width, y,
+              PdfFontManager.fontRegular, maxFontInLine);
         }
       } else if (word.isShape) {
-        _drawShape(builder, word.shape!, textX, y - word.shape!.height * 0.8);
-        textX += word.width;
-        if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
-          _drawGapSpace(
-              builder, textX, y, PdfFontManager.fontRegular, fontSize);
-          textX += spaceWidth + wordSpacing;
+        _drawShape(builder, word.shape!, textX, y);
+        if (hasNext) {
+          _drawGapSpace(builder, textX + word.width, y,
+              PdfFontManager.fontRegular, maxFontInLine);
         }
       } else if (word.isCheckbox) {
-        // Draw checkbox manually
         builder.saveState();
-
-        final checkboxFontSize = word.fontSize ?? fontSize;
+        final checkboxFontSize = word.fontSize ?? fontSize0;
         final boxSize = checkboxFontSize * 0.8;
         final boxY = y - boxSize * 0.1;
 
@@ -1045,25 +1063,21 @@ class PdfExporter {
           builder.lineTo(textX, boxY + boxSize);
           builder.strokePath();
         }
-
         builder.restoreState();
-        textX += word.width;
 
-        if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
-          _drawGapSpace(builder, textX, y, word.fontRef, checkboxFontSize);
-          textX += spaceWidth + wordSpacing;
+        if (hasNext) {
+          _drawGapSpace(
+              builder, textX + word.width, y, word.fontRef, checkboxFontSize);
         }
       } else {
-        // Normal text rendering with absolute positioning
-        var effFontSize = (word.fontSize ?? fontSize).toDouble();
+        var effFontSize = word.fontSize ?? fontSize0;
         var yPos = y;
-
         if (word.isSuperscript) {
           effFontSize *= 0.6;
-          yPos = y + maxFontInLine * 0.4;
+          yPos = y + maxFontInLine * 0.35;
         } else if (word.isSubscript) {
           effFontSize *= 0.6;
-          yPos = y - maxFontInLine * 0.2;
+          yPos = y - maxFontInLine * 0.15;
         }
 
         builder.beginText();
@@ -1072,60 +1086,60 @@ class PdfExporter {
         builder.setFillColorHex(word.color);
         builder.showText(word.text);
         // Every word gets its own absolutely-positioned Tj, so a text
-        // extractor (pypdf, browser copy/paste, ...) sees no natural glyph
-        // advance to infer a word boundary from - draw an actual space
-        // glyph between words instead of just leaving a positional gap, or
-        // adjacent words silently run together when extracted/searched.
-        if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
+        // extractor sees no natural glyph advance to infer a word boundary
+        // from - draw an actual space glyph between words, or adjacent
+        // words silently run together when extracted/searched.
+        if (hasNext) {
           builder.setTextMatrix(textX + word.width, yPos);
           builder.showText(' ');
         }
         builder.endText();
 
-        // Collect underline/strikethrough decorations
+        bool sameDecoration(bool Function(_Word w) test) =>
+            k + 1 < words.length &&
+            test(words[k + 1]) &&
+            words[k + 1].color == word.color &&
+            !words[k + 1].isImage;
+        final thickness = math.max(0.5, effFontSize / 24);
         if (word.isUnderline) {
           decorations.add(_TextDecoration(
             x: textX,
-            y: yPos - effFontSize * 0.15,
-            width: word.width,
+            y: yPos - effFontSize * 0.12,
+            width: (sameDecoration((w) => w.isUnderline)
+                    ? spanTo(k)
+                    : textX + word.width) -
+                textX,
             color: word.color,
-            isStrike: false,
+            thickness: thickness,
           ));
         }
         if (word.isStrike) {
           decorations.add(_TextDecoration(
             x: textX,
-            y: yPos + effFontSize * 0.3,
-            width: word.width,
+            y: yPos + effFontSize * 0.28,
+            width: (sameDecoration((w) => w.isStrike)
+                    ? spanTo(k)
+                    : textX + word.width) -
+                textX,
             color: word.color,
-            isStrike: true,
+            thickness: thickness,
           ));
         }
 
         if (word.href != null) {
+          final linked = k + 1 < words.length && words[k + 1].href == word.href;
           _pageLinks.add(_PendingLink(
             x: textX,
-            y: yPos - effFontSize * 0.2,
-            width: word.width,
-            height: effFontSize * 1.2,
+            y: yPos - effFontSize * 0.22,
+            width: (linked ? spanTo(k) : textX + word.width) - textX,
+            height: effFontSize * 1.15,
             uri: word.href!,
           ));
-        }
-
-        textX += word.width;
-
-        if (k < line.length - 1 && !line[k + 1].glueToPrevious) {
-          textX += spaceWidth + wordSpacing;
         }
       }
     }
   }
 
-  /// Turns a run of inline nodes (paragraph children, or a drop cap's
-  /// `restOfParagraph`) into flat [_Word]s ready for [_flowWords]/
-  /// [_flowWordsVariableWidth]. Shared so drop caps flow their trailing text
-  /// through the exact same word model as ordinary paragraphs instead of a
-  /// parallel, easily-divergent implementation.
   /// Falls back to the bundled Unicode-broad font when [content] has a
   /// character [selectedFontRef] (a standard font, or an embedded font
   /// that doesn't happen to cover it) can't render. An explicit
@@ -1135,29 +1149,57 @@ class PdfExporter {
   /// characters like Cyrillic/Greek/Vietnamese text.
   String _withUnicodeFallback(
       String selectedFontRef, String content, String? fontFamily) {
-    if (fontFamily != null) return selectedFontRef;
+    if (fontFamily != null &&
+        _fontManager.getEmbeddedFont(selectedFontRef) != null) {
+      return selectedFontRef;
+    }
     if (!_fontManager.needsUnicodeFallback(content)) return selectedFontRef;
     return _fontManager.fallbackUnicodeFontRef;
   }
 
-  List<_Word> _collectWords(List<DocxInline> children,
-      PdfContentBuilder builder, double fontSize, bool isHeading) {
+  bool _isBoldRef(String fontRef) =>
+      fontRef == PdfFontManager.fontBold ||
+      fontRef == PdfFontManager.fontBoldItalic;
+
+  double _measure(String text, double size, String fontRef) => _fontManager
+      .measureText(text, size, isBold: _isBoldRef(fontRef), fontRef: fontRef);
+
+  /// Turns a run of inline nodes into flat [_Word]s for [_flowLines].
+  ///
+  /// Whitespace is tracked across run boundaries: two runs with no space
+  /// between them (`Word<b>glued</b>`, `H<sub>2</sub>O`) stay glued and are
+  /// kept on one line, and runs of several spaces (code, DOCX text) keep
+  /// their width instead of collapsing to one.
+  List<_Word> _collectWords(List<DocxInline> children, double fontSize,
+      {bool forceBold = false, bool register = false}) {
     final words = <_Word>[];
-    for (final child in children) {
+    var pendingGap = 0.0; // whitespace seen since the last word
+    var pendingSpaces = 0;
+
+    bool atLineStart() => words.isEmpty || words.last.isBreak;
+
+    void addWord(_Word word) {
+      words.add(word);
+      pendingGap = 0;
+      pendingSpaces = 0;
+    }
+
+    for (var i = 0; i < children.length; i++) {
+      final child = children[i];
       if (child is DocxText) {
-        // Apply bold for headings or if text is explicitly bold
+        final isBold = child.isBold || forceBold;
         final fontRef = _withUnicodeFallback(
           _fontManager.selectFont(
-            isBold: child.isBold || isHeading,
+            isBold: isBold,
             isItalic: child.isItalic,
             fontFamily: child.fontFamily,
           ),
           child.content,
           child.fontFamily,
         );
-        final color = child.effectiveColorHex ?? '000000';
+        final color = child.effectiveColorHex ??
+            (child.href != null ? '0563C1' : '000000');
 
-        // Determine background color from highlight or shadingFill
         String? backgroundColor;
         if (child.highlight != DocxHighlight.none) {
           backgroundColor = _highlightToHex(child.highlight);
@@ -1165,93 +1207,93 @@ class PdfExporter {
           backgroundColor = child.shadingFill;
         }
 
-        // Decode HTML entities and handle newlines
-        final decodedText = PdfContentBuilder.decodeHtmlEntities(child.content);
+        final runFontSize = (child.fontSize ?? fontSize).toDouble();
+        var effFontSize = runFontSize;
+        if (child.isSuperscript || child.isSubscript) effFontSize *= 0.6;
+        final spaceWidth = _measure(' ', effFontSize, fontRef);
 
-        // Split by newlines first to preserve line breaks in code blocks
-        final lines = decodedText.split('\n');
-        for (var lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-          final line = lines[lineIdx];
-
-          // Split each line segment by spaces for word wrapping
-          for (final word in line.split(' ')) {
-            if (word.isNotEmpty) {
-              // Check for checkboxes
-              bool isCheckbox = false;
-              int? checkboxType;
-              if (word == '☐') {
-                isCheckbox = true;
-                checkboxType = 0;
-              } else if (word == '☑') {
-                isCheckbox = true;
-                checkboxType = 1;
-              } else if (word == '☒') {
-                isCheckbox = true;
-                checkboxType = 2;
-              }
-
-              // Calculate width - handle custom font size and superscript/subscript
-              var effFontSize = (child.fontSize ?? fontSize).toDouble();
-              if (child.isSuperscript || child.isSubscript) {
-                effFontSize *= 0.6;
-              }
-              // Use isBold for accurate text measurement
-              final isBold = child.isBold || isHeading;
-              final width = isCheckbox
-                  ? effFontSize
-                  : builder.measureText(word, effFontSize,
-                      isBold: isBold,
-                      fontRef: fontRef,
-                      fontManager: _fontManager);
-
-              words.add(_Word(
-                word,
-                fontRef,
-                color,
-                width,
-                isUnderline: child.isUnderline,
-                isStrike: child.isStrike,
-                backgroundColor: backgroundColor,
-                fontSize: child.fontSize,
-                isSuperscript: child.isSuperscript,
-                isSubscript: child.isSubscript,
-                isCheckbox: isCheckbox,
-                checkboxType: checkboxType,
-                href: child.href,
-              ));
-            }
+        final text = PdfContentBuilder.decodeHtmlEntities(child.content)
+            .replaceAll('\r\n', '\n')
+            .replaceAll('\t', '    ');
+        final token = RegExp(r'\n|[  ]+|[^  \n]+');
+        for (final m in token.allMatches(text)) {
+          final part = m.group(0)!;
+          if (part == '\n') {
+            words.add(_Word.lineBreak(srcIndex: i, srcOffset: m.start));
+            pendingGap = 0;
+            pendingSpaces = 0;
+            continue;
+          }
+          if (part.trim().isEmpty && !part.contains(RegExp(r'[^  ]'))) {
+            pendingGap += spaceWidth * part.length;
+            pendingSpaces += part.length;
+            continue;
           }
 
-          // Add line break between text lines (but not after the last one)
-          if (lineIdx < lines.length - 1) {
-            words.add(_Word.lineBreak());
-          }
+          int? checkboxType;
+          if (part == '☐') checkboxType = 0;
+          if (part == '☑') checkboxType = 1;
+          if (part == '☒') checkboxType = 2;
+          final isCheckbox = checkboxType != null;
+
+          final lineStart = atLineStart();
+          final shown =
+              child.isAllCaps || child.isSmallCaps ? part.toUpperCase() : part;
+          addWord(_Word(
+            shown,
+            fontRef,
+            color,
+            isCheckbox ? effFontSize : _measure(shown, effFontSize, fontRef),
+            gap: lineStart ? 0 : pendingGap,
+            // Leading indentation (2+ spaces) at a line start is kept, e.g.
+            // code blocks; a single leading space is not.
+            lineStartGap: lineStart && pendingSpaces > 1 ? pendingGap : 0,
+            noBreakBefore: !lineStart && pendingSpaces == 0,
+            isUnderline: child.isUnderline,
+            isStrike: child.isStrike,
+            backgroundColor: backgroundColor,
+            fontSize: runFontSize,
+            isSuperscript: child.isSuperscript,
+            isSubscript: child.isSubscript,
+            isCheckbox: isCheckbox,
+            checkboxType: checkboxType,
+            href: child.href,
+            srcIndex: i,
+            srcOffset: m.start,
+          ));
         }
       } else if (child is DocxLineBreak) {
-        words.add(_Word.lineBreak());
+        words.add(_Word.lineBreak(srcIndex: i, isChildBreak: true));
+        pendingGap = 0;
+        pendingSpaces = 0;
       } else if (child is DocxTab) {
-        words.add(_Word.tab(fontSize * 3));
+        addWord(_Word.tab(srcIndex: i));
       } else if (child is DocxInlineImage) {
-        final imageWord = _registerInlineImage(child);
-        if (imageWord != null) words.add(imageWord);
+        final gap = atLineStart() ? 0.0 : pendingGap;
+        addWord(_inlineImageWord(child, register, i, gap));
       } else if (child is DocxShape) {
-        words.add(_Word.shape(child, child.width));
+        final gap = atLineStart() ? 0.0 : pendingGap;
+        addWord(_Word.shapeWord(child, child.width, gap: gap, srcIndex: i));
       } else if (child is DocxFootnoteRef || child is DocxEndnoteRef) {
-        // The reference itself is just a small superscript number in the
-        // body text; the actual note content is rendered separately (at the
-        // bottom of the page for footnotes, or on a trailing page for
-        // endnotes — see _renderFootnoteArea / the endnotes pass in
-        // exportToBytes).
+        // The reference itself is just a small superscript number glued to
+        // the preceding word; the note content is rendered separately.
         final markerId = child is DocxFootnoteRef
             ? child.footnoteId
             : (child as DocxEndnoteRef).endnoteId;
         final marker = '$markerId';
         final markerFontRef = _fontManager.selectFont();
-        final markerWidth = builder.measureText(
-            marker, fontSize.toDouble() * 0.6,
-            fontRef: markerFontRef, fontManager: _fontManager);
-        words.add(_Word(marker, markerFontRef, '000000', markerWidth,
-            isSuperscript: true));
+        final lineStart = atLineStart();
+        addWord(_Word(
+          marker,
+          markerFontRef,
+          '000000',
+          _measure(marker, fontSize * 0.6, markerFontRef),
+          gap: lineStart ? 0 : pendingGap,
+          noBreakBefore: !lineStart && pendingSpaces == 0,
+          fontSize: fontSize,
+          isSuperscript: true,
+          srcIndex: i,
+        ));
       }
     }
     return words;
@@ -1297,94 +1339,91 @@ class PdfExporter {
     }
   }
 
-  List<List<_Word>> _flowWords(
-      List<_Word> words, double maxWidth, double spaceWidth) {
-    final lines = <List<_Word>>[];
-    var currentLine = <_Word>[];
-    var currentWidth = 0.0;
+  /// Default tab stops every half inch, as in Word.
+  static const double _tabStop = 36.0;
+
+  /// Greedy line packing. The available width can differ per line
+  /// (`widthForLine(lineIndex)`) for first-line indents and drop caps.
+  /// Glued words (no whitespace between them in the source) move to the
+  /// next line together rather than being split mid-word.
+  List<_Line> _flowLines(
+      List<_Word> words, double Function(int lineIndex) widthForLine) {
+    final lines = <_Line>[];
+    var current = _Line(afterBreak: true, srcIndex: 0, srcOffset: 0);
+    var width = 0.0;
+
+    double gapFor(_Word w, _Line line) =>
+        line.words.isEmpty ? (line.afterBreak ? w.lineStartGap : 0) : w.gap;
 
     for (final word in words) {
       if (word.isBreak) {
-        lines.add(currentLine);
-        currentLine = [];
-        currentWidth = 0;
+        lines.add(current);
+        current = _Line(
+            afterBreak: true,
+            srcIndex: word.srcIndex,
+            srcOffset: word.srcOffset + 1,
+            srcAfterChild: word.srcOffset == 0 && word.isChildBreak);
+        width = 0;
         continue;
       }
-
-      // A glued continuation chunk (see _splitOverlongWords) never gets a
-      // space before it - it's part of the same original word.
-      final gap =
-          (currentLine.isNotEmpty && !word.glueToPrevious) ? spaceWidth : 0.0;
-
-      if (currentWidth + gap + word.width > maxWidth &&
-          currentLine.isNotEmpty) {
-        lines.add(currentLine);
-        currentLine = [word];
-        currentWidth = word.width;
-      } else {
-        currentWidth += gap;
-        currentLine.add(word);
-        currentWidth += word.width;
-      }
-    }
-
-    if (currentLine.isNotEmpty) lines.add(currentLine);
-    if (lines.isEmpty) lines.add([]);
-    return lines;
-  }
-
-  /// Same greedy line-packing as [_flowWords], but the available width can
-  /// differ per output line (`widthForLine(lineIndex)`) instead of being one
-  /// constant — used by [_renderDropCap] so the lines running alongside the
-  /// drop cap letter are narrower than the lines below it.
-  List<List<_Word>> _flowWordsVariableWidth(List<_Word> words,
-      double spaceWidth, double Function(int lineIndex) widthForLine) {
-    final lines = <List<_Word>>[];
-    var currentLine = <_Word>[];
-    var currentWidth = 0.0;
-
-    for (final word in words) {
       final maxWidth = widthForLine(lines.length);
 
-      if (word.isBreak) {
-        lines.add(currentLine);
-        currentLine = [];
-        currentWidth = 0;
-        continue;
+      var placed = word;
+      if (word.isTab) {
+        final pos = width;
+        final next = ((pos / _tabStop).floor() + 1) * _tabStop;
+        placed = word.withWidth(math.max(next - pos, 1));
       }
 
-      final gap =
-          (currentLine.isNotEmpty && !word.glueToPrevious) ? spaceWidth : 0.0;
-
-      if (currentWidth + gap + word.width > maxWidth &&
-          currentLine.isNotEmpty) {
-        lines.add(currentLine);
-        currentLine = [word];
-        currentWidth = word.width;
+      final gap = gapFor(placed, current);
+      if (current.words.isNotEmpty && width + gap + placed.width > maxWidth) {
+        // Carry a glued tail (e.g. "Word" + "glued") to the next line.
+        final tail = <_Word>[];
+        if (placed.noBreakBefore) {
+          while (current.words.isNotEmpty) {
+            final last = current.words.removeLast();
+            tail.insert(0, last);
+            if (!last.noBreakBefore) break;
+          }
+          if (current.words.isEmpty) {
+            // The whole line is one glued group: break inside it instead.
+            current.words.addAll(tail);
+            tail.clear();
+          }
+        }
+        lines.add(current);
+        final first = tail.isNotEmpty ? tail.first : placed;
+        current = _Line(
+            afterBreak: false,
+            srcIndex: first.srcIndex,
+            srcOffset: first.srcOffset);
+        width = 0;
+        for (final w in [...tail, placed]) {
+          var p = w;
+          if (w.isTab) {
+            final next = ((width / _tabStop).floor() + 1) * _tabStop;
+            p = w.withWidth(math.max(next - width, 1));
+          }
+          width += gapFor(p, current) + p.width;
+          current.words.add(p);
+        }
       } else {
-        currentWidth += gap;
-        currentLine.add(word);
-        currentWidth += word.width;
+        width += gap + placed.width;
+        current.words.add(placed);
       }
     }
 
-    if (currentLine.isNotEmpty) lines.add(currentLine);
-    if (lines.isEmpty) lines.add([]);
+    lines.add(current);
     return lines;
   }
 
-  /// Breaks any word wider than [maxWidth] into smaller glued chunks (see
-  /// [_Word.glueToPrevious]) that each individually fit, so a long word or
-  /// URL with no natural break point no longer draws past the right margin
-  /// unbroken. Words that already fit, and non-text words (tabs, images,
-  /// shapes, checkboxes), pass through unchanged.
-  ///
-  /// [defaultFontSize] must be the caller's own resolved paragraph font size
-  /// (e.g. a heading's larger size), not [fontSize] (the exporter's flat
-  /// base size) - it's only used as a fallback for words with no per-run
-  /// [_Word.fontSize] override, exactly like [_collectWords] does.
-  List<_Word> _splitOverlongWords(List<_Word> words, double maxWidth,
-      double defaultFontSize, PdfContentBuilder builder) {
+  /// Breaks any word wider than [maxWidth] into smaller glued chunks that
+  /// each individually fit, so a long word or URL with no natural break
+  /// point no longer draws past the right margin unbroken. Words that
+  /// already fit, and non-text words (tabs, images, shapes, checkboxes),
+  /// pass through unchanged.
+  List<_Word> _splitOverlongWords(
+      List<_Word> words, double maxWidth, double defaultFontSize) {
     if (maxWidth <= 0) return words;
 
     final result = <_Word>[];
@@ -1401,10 +1440,8 @@ class PdfExporter {
         continue;
       }
 
-      var effFontSize = (word.fontSize ?? defaultFontSize).toDouble();
+      var effFontSize = word.fontSize ?? defaultFontSize;
       if (word.isSuperscript || word.isSubscript) effFontSize *= 0.6;
-      final isBold = word.fontRef == PdfFontManager.fontBold ||
-          word.fontRef == PdfFontManager.fontBoldItalic;
       final runes = word.text.runes.toList();
 
       // Measure each rune's width once and accumulate a running sum while
@@ -1412,12 +1449,12 @@ class PdfExporter {
       // substring per character (which is quadratic in the word's length).
       final runeWidths = List<double>.generate(
         runes.length,
-        (i) => builder.measureText(String.fromCharCode(runes[i]), effFontSize,
-            isBold: isBold, fontRef: word.fontRef, fontManager: _fontManager),
+        (i) =>
+            _measure(String.fromCharCode(runes[i]), effFontSize, word.fontRef),
       );
 
       var start = 0;
-      var isFirstChunk = true;
+      var offset = word.srcOffset;
       while (start < runes.length) {
         var end = start + 1;
         var chunkWidth = runeWidths[start];
@@ -1425,34 +1462,185 @@ class PdfExporter {
           chunkWidth += runeWidths[end];
           end++;
         }
-
-        result.add(_Word(
-          String.fromCharCodes(runes, start, end),
-          word.fontRef,
-          word.color,
+        final chunkText = String.fromCharCodes(runes, start, end);
+        final isFirst = start == 0;
+        result.add(word.copyWithText(
+          chunkText,
           chunkWidth,
-          isUnderline: word.isUnderline,
-          isStrike: word.isStrike,
-          backgroundColor: word.backgroundColor,
-          fontSize: word.fontSize,
-          isSuperscript: word.isSuperscript,
-          isSubscript: word.isSubscript,
-          href: word.href,
-          glueToPrevious: !isFirstChunk,
+          gap: isFirst ? word.gap : 0,
+          noBreakBefore: isFirst ? word.noBreakBefore : false,
+          srcOffset: offset,
         ));
-        isFirstChunk = false;
+        offset += chunkText.length;
         start = end;
       }
     }
     return result;
   }
 
+  // ===========================================================================
+  // Pagination measurement (PdfBlockMeasurer)
+  // ===========================================================================
+
+  /// The layout engine of the section currently being processed.
+  PdfLayoutEngine? _layoutEngine;
+
+  double get fontSize0 => fontSize.toDouble();
+
+  @override
+  double measureParagraph(DocxParagraph paragraph, double width) =>
+      _layoutParagraph(paragraph, width).height;
+
+  @override
+  List<DocxParagraph> splitParagraph(
+      DocxParagraph paragraph, double width, double availableHeight) {
+    final pl = _layoutParagraph(paragraph, width);
+    var used = pl.spaceBefore + pl.padTop;
+    var fit = 0;
+    for (final line in pl.lines) {
+      if (used + line.height + pl.padBottom > availableHeight + 0.01) break;
+      used += line.height;
+      fit++;
+    }
+    final empty = paragraph.copyWith(children: const []);
+    if (fit == 0) return [empty, paragraph];
+    if (fit >= pl.lines.length) return [paragraph, empty];
+
+    final splitLine = pl.lines[fit];
+    final children = paragraph.children;
+    final fitted = <DocxInline>[];
+    final rest = <DocxInline>[];
+    final si = splitLine.srcIndex.clamp(0, children.length);
+    fitted.addAll(children.take(si));
+    if (si < children.length) {
+      final child = children[si];
+      if (child is DocxText &&
+          splitLine.srcOffset > 0 &&
+          !splitLine.srcAfterChild) {
+        final text = PdfContentBuilder.decodeHtmlEntities(child.content)
+            .replaceAll('\r\n', '\n')
+            .replaceAll('\t', '    ');
+        final offset = splitLine.srcOffset.clamp(0, text.length);
+        final head = text.substring(0, offset);
+        var tail = text.substring(offset);
+        if (!splitLine.afterBreak) tail = tail.trimLeft();
+        if (head.trim().isNotEmpty || head.contains('\n')) {
+          fitted.add(child.copyWith(content: head.trimRight()));
+        }
+        if (tail.isNotEmpty) rest.add(child.copyWith(content: tail));
+        rest.addAll(children.skip(si + 1));
+      } else if (splitLine.srcAfterChild) {
+        fitted.add(child);
+        rest.addAll(children.skip(si + 1));
+      } else {
+        rest.addAll(children.skip(si));
+      }
+    }
+    if (rest.isEmpty) return [paragraph, empty];
+    return [
+      paragraph.copyWith(children: fitted, spacingAfter: 0),
+      paragraph.copyWith(
+          children: rest,
+          spacingBefore: 0,
+          indentFirstLine: 0,
+          pageBreakBefore: false),
+    ];
+  }
+
+  @override
+  double measureList(DocxList list, double width) {
+    final items = _layoutList(list, width, register: false);
+    return items.fold<double>(0, (sum, i) => sum + i.layout.height) +
+        fontSize0 * 0.5;
+  }
+
+  @override
+  List<DocxList> splitList(
+      DocxList list, double width, double availableHeight) {
+    final items = _layoutList(list, width, register: false);
+    var used = fontSize0 * 0.5;
+    var fit = 0;
+    for (final item in items) {
+      if (used + item.layout.height > availableHeight) break;
+      used += item.layout.height;
+      fit++;
+    }
+    if (fit >= list.items.length) {
+      return [list, list.copyWith(items: const [])];
+    }
+    // Continue numbering in the remainder by carrying the top-level count.
+    final nextTop = fit == 0 ? list.startIndex : items[fit - 1].nextTopLevel;
+    return [
+      list.copyWith(items: list.items.take(fit).toList()),
+      list.copyWith(items: list.items.skip(fit).toList(), startIndex: nextTop),
+    ];
+  }
+
+  @override
+  double measureCell(DocxTableCell cell, double width) =>
+      _cellPadding(cell).vertical +
+      _measureBlocks(cell.children, width - _cellPadding(cell).horizontal);
+
+  /// Height of a sequence of blocks laid out in a table cell.
+  double _measureBlocks(List<DocxBlock> blocks, double width) {
+    var height = 0.0;
+    for (final block in blocks) {
+      if (block is DocxParagraph) {
+        height += _layoutParagraph(block, width, kind: _ParaKind.cell).height;
+      } else if (block is DocxList) {
+        height += measureList(block, width);
+      } else if (block is DocxTable) {
+        height += _measureNestedTable(block, width);
+      } else if (block is DocxImage) {
+        height += math.min(block.height, 10000) + 4;
+      }
+    }
+    return height;
+  }
+
+  double _measureNestedTable(DocxTable table, double width) {
+    final colWidths = _proportionalColumnWidths(table, width);
+    var height = 0.0;
+    for (final row in table.rows) {
+      height += _rowHeight(row, colWidths);
+    }
+    return height + 4;
+  }
+
+  double _rowHeight(DocxTableRow row, List<double> colWidths) {
+    var maxHeight = (row.height ?? 0) / 20.0;
+    var col = 0;
+    for (final cell in row.cells) {
+      var w = 0.0;
+      for (var j = 0; j < cell.colSpan && col + j < colWidths.length; j++) {
+        w += colWidths[col + j];
+      }
+      maxHeight = math.max(maxHeight, measureCell(cell, w));
+      col += cell.colSpan;
+    }
+    return maxHeight;
+  }
+
+  /// Cell padding: the cell's own left/right margins, else the table-wide
+  /// cell padding, else Word's defaults (0.08" left/right).
+  _Insets _cellPadding(DocxTableCell cell) {
+    final left = (cell.marginLeft ?? _currentCellPadding ?? 115) / 20.0;
+    final right = (cell.marginRight ?? _currentCellPadding ?? 115) / 20.0;
+    return _Insets(left, 3, right, 3);
+  }
+
+  int? _currentCellPadding;
+
+  // ===========================================================================
+  // Tables
+  // ===========================================================================
+
   /// Renders a table with real column widths (from
   /// [DocxTable.resolvedGridColumns]), colSpan/rowSpan-aware cell placement,
-  /// per-cell/table border and style resolution, and nested list/table
-  /// content in cells. [availableWidth] lets nested tables (rendered inside
-  /// a cell) use the cell's width instead of the full page content width;
-  /// pagination itself is handled ahead of time by
+  /// per-cell/table border and style resolution, cell vertical alignment and
+  /// nested list/table content in cells. [availableWidth] lets nested
+  /// tables (rendered inside a cell) use the cell's width instead of the
+  /// full page content width; pagination itself is handled ahead of time by
   /// `PdfLayoutEngine.paginate`, which splits tables by row so they never
   /// overflow the bottom margin.
   double _renderTable(
@@ -1469,8 +1657,13 @@ class PdfExporter {
         ? _proportionalColumnWidths(table, availableWidth)
         : layout.tableColumnWidths(table);
     if (colWidths.isEmpty) return startY;
+    final previousPadding = _currentCellPadding;
+    _currentCellPadding = table.style.cellPadding;
 
-    final colX = List<double>.filled(colWidths.length + 1, startX);
+    final originX = availableWidth == null
+        ? startX + layout.tableOffset(table, colWidths)
+        : startX;
+    final colX = List<double>.filled(colWidths.length + 1, originX);
     for (var i = 0; i < colWidths.length; i++) {
       colX[i + 1] = colX[i] + colWidths[i];
     }
@@ -1481,13 +1674,12 @@ class PdfExporter {
     final activeSpans = <int, int>{};
 
     for (final row in table.rows) {
-      final rowHeight = layout.measureRowHeight(row, colWidths);
+      final rowHeight = _rowHeight(row, colWidths);
 
       // Map this row's cells onto grid columns, skipping columns currently
       // occupied by a taller cell spanning down from a previous row. This
       // assumes rows omit cells for spanned columns (the convention the
-      // DOCX writer itself follows: it never emits a `w:vMerge="continue"`
-      // placeholder cell for continuation rows).
+      // DOCX writer itself follows).
       final placements = <_CellPlacement>[];
       var colIndex = 0;
       for (final cell in row.cells) {
@@ -1506,7 +1698,9 @@ class PdfExporter {
         placements
             .add(_CellPlacement(cell, colIndex, colX[colIndex], spanWidth));
         if (cell.rowSpan > 1) {
-          activeSpans[colIndex] = cell.rowSpan - 1;
+          for (var j = 0; j < cell.colSpan; j++) {
+            activeSpans[colIndex + j] = cell.rowSpan - 1;
+          }
         }
         colIndex += cell.colSpan;
       }
@@ -1528,22 +1722,37 @@ class PdfExporter {
         _drawCellBorders(builder, table, p, y, rowHeight);
       }
 
-      // Content: paragraphs, plus nested lists/tables that were previously
-      // silently dropped.
+      // Content, vertically aligned within the row.
       for (final p in placements) {
-        final cellX = p.x + 2;
-        var cellY = y - fontSize - 4;
+        final pad = _cellPadding(p.cell);
+        final innerWidth = p.width - pad.horizontal;
+        final contentHeight = _measureBlocks(p.cell.children, innerWidth);
+        final slack = rowHeight - pad.vertical - contentHeight;
+        var offset = 0.0;
+        if (slack > 0) {
+          if (p.cell.verticalAlign == DocxVerticalAlign.center) {
+            offset = slack / 2;
+          } else if (p.cell.verticalAlign == DocxVerticalAlign.bottom) {
+            offset = slack;
+          }
+        }
+        final cellX = p.x + pad.left;
+        var cellY = y - pad.top - offset;
         for (final block in p.cell.children) {
           if (block is DocxParagraph) {
-            _renderCellParagraph(
-                block, builder, cellX, cellY, p.width - 4, layout);
-            cellY -= layout.measureParagraphInWidth(block, p.width - 4);
+            final pl = _layoutParagraph(block, innerWidth,
+                kind: _ParaKind.cell, register: true);
+            cellY = _drawParagraph(pl, builder, cellX, cellY);
           } else if (block is DocxList) {
-            cellY = _renderListInWidth(
-                block, builder, cellX, cellY, p.width - 4, layout);
+            cellY = _drawList(block, builder, cellX, cellY, innerWidth);
           } else if (block is DocxTable) {
             cellY = _renderTable(block, builder, cellX, cellY, layout,
-                availableWidth: p.width - 4);
+                    availableWidth: innerWidth) +
+                6;
+          } else if (block is DocxImage) {
+            cellY = _renderImage(block, builder, cellX, cellY, layout,
+                    availableWidth: innerWidth) +
+                6;
           }
         }
       }
@@ -1551,8 +1760,12 @@ class PdfExporter {
       // Age spans that were already active going into this row; ones that
       // just started here already have `rowSpan - 1` remaining rows AFTER
       // this one, so they're left untouched.
+      final startedHere = <int>{
+        for (final p in placements)
+          for (var j = 0; j < p.cell.colSpan; j++) p.colIndex + j
+      };
       for (final key in activeSpans.keys.toList()) {
-        if (placements.any((p) => p.colIndex == key)) continue;
+        if (startedHere.contains(key)) continue;
         final remaining = activeSpans[key]! - 1;
         if (remaining <= 0) {
           activeSpans.remove(key);
@@ -1564,7 +1777,8 @@ class PdfExporter {
       y -= rowHeight;
     }
 
-    return y - 10;
+    _currentCellPadding = previousPadding;
+    return y - (availableWidth == null ? 10 : 4);
   }
 
   /// Same as [PdfLayoutEngine.tableColumnWidths] but scaled to an explicit
@@ -1637,220 +1851,139 @@ class PdfExporter {
     builder.restoreState();
   }
 
-  /// Minimal text-only renderer for a [DocxList] nested inside a table cell,
-  /// wrapped to [width] instead of the page's content width. Previously
-  /// nested lists in cells reserved layout space (via
-  /// `PdfLayoutEngine.measureCell`) but drew nothing at all.
-  double _renderListInWidth(
-    DocxList list,
-    PdfContentBuilder builder,
-    double startX,
-    double startY,
-    double width,
-    PdfLayoutEngine layout,
-  ) {
-    var y = startY;
-    // Keyed by nesting level so a sub-item restarts at 1 instead of
-    // continuing its parent's count (e.g. "1., 2." then a nested item
-    // showing "3." instead of restarting its own "1.").
-    final orderedCounters = <int, int>{};
-    final lineHeight = fontSize * 1.4;
-    const bulletIndent = 12.0;
-    const textIndent = 14.0;
-    final spaceWidth = fontSize * 0.278;
+  // ===========================================================================
+  // Lists
+  // ===========================================================================
 
-    for (final item in list.items) {
-      final levelIndent = item.level * bulletIndent;
-      final markerX = startX + levelIndent;
-      final contentX = markerX + textIndent;
-      final availableWidth = width - levelIndent - textIndent;
+  static const _defaultListStyle = DocxListStyle();
+  static const _defaultBullets = ['•', '○', '▪'];
+  static const _defaultNumberFormats = [
+    DocxNumberFormat.decimal,
+    DocxNumberFormat.lowerAlpha,
+    DocxNumberFormat.lowerRoman,
+  ];
 
-      orderedCounters.removeWhere((level, _) => level > item.level);
-      String marker;
-      if (list.isOrdered) {
-        final start = item.level == 0 ? list.startIndex : 1;
-        final next = (orderedCounters[item.level] ?? (start - 1)) + 1;
-        orderedCounters[item.level] = next;
-        marker = '$next.';
-      } else {
-        marker = '•';
-      }
-      builder.beginText();
-      builder.setTextMatrix(markerX, y);
-      builder.setFont(PdfFontManager.fontRegular, fontSize.toDouble());
-      builder.setFillColorHex('000000');
-      builder.showText(marker);
-      builder.endText();
-
-      final text =
-          item.children.whereType<DocxText>().map((t) => t.content).join();
-      final words = PdfContentBuilder.decodeHtmlEntities(text)
-          .split(' ')
-          .where((w) => w.isNotEmpty)
-          .toList();
-
-      final lines = <List<String>>[];
-      var currentLine = <String>[];
-      var currentWidth = 0.0;
-      for (final word in words) {
-        final w = builder.measureText(word, fontSize.toDouble());
-        if (currentWidth + w + spaceWidth > availableWidth &&
-            currentLine.isNotEmpty) {
-          lines.add(currentLine);
-          currentLine = [word];
-          currentWidth = w;
-        } else {
-          if (currentLine.isNotEmpty) currentWidth += spaceWidth;
-          currentLine.add(word);
-          currentWidth += w;
-        }
-      }
-      if (currentLine.isNotEmpty) lines.add(currentLine);
-      if (lines.isEmpty) lines.add(const []);
-
-      for (final line in lines) {
-        if (line.isNotEmpty) {
-          builder.beginText();
-          builder.setTextMatrix(contentX, y);
-          builder.setFont(PdfFontManager.fontRegular, fontSize.toDouble());
-          builder.setFillColorHex('000000');
-          builder.showText(line.join(' '));
-          builder.endText();
-        }
-        y -= lineHeight;
-      }
-    }
-
-    return y;
+  /// Mirrors the DOCX numbering the package writes: a list using the
+  /// default style cycles bullets (•, ○, ▪) or formats (1, a, i) by level;
+  /// a customised style applies its own bullet/format at every level.
+  bool _isCustomListStyle(DocxListStyle style, bool isOrdered) {
+    const ref = _defaultListStyle;
+    final custom = style.fontFamily != null ||
+        style.fontSize != null ||
+        style.fontWeight != ref.fontWeight ||
+        style.color != ref.color ||
+        style.indentPerLevel != ref.indentPerLevel ||
+        style.hangingIndent != ref.hangingIndent;
+    return isOrdered
+        ? custom || style.numberFormat != ref.numberFormat
+        : custom || style.bullet != ref.bullet;
   }
 
-  double _renderCellParagraph(
-    DocxParagraph paragraph,
-    PdfContentBuilder builder,
-    double x,
-    double y,
-    double width,
-    PdfLayoutEngine layout,
-  ) {
-    // 1. Collect all words from the paragraph
-    final words = <_Word>[];
-    for (final child in paragraph.children) {
-      if (child is DocxText) {
-        final fontRef = _withUnicodeFallback(
-          _fontManager.selectFont(
-            isBold: child.isBold,
-            isItalic: child.isItalic,
-            fontFamily: child.fontFamily,
-          ),
-          child.content,
-          child.fontFamily,
-        );
-        final color = child.effectiveColorHex ?? '000000';
+  /// Lays out every item of [list]: marker text plus a paragraph layout
+  /// indented like the DOCX numbering (`w:ind left=(lvl+1)*indent`).
+  List<_ListItemLayout> _layoutList(DocxList list, double width,
+      {required bool register}) {
+    final result = <_ListItemLayout>[];
+    final counters = <int, int>{};
 
-        String? backgroundColor;
-        if (child.highlight != DocxHighlight.none) {
-          backgroundColor = _highlightToHex(child.highlight);
-        } else if (child.shadingFill != null && child.shadingFill != 'auto') {
-          backgroundColor = child.shadingFill;
-        }
+    for (final item in list.items) {
+      final style = item.overrideStyle ?? list.style;
+      final custom = _isCustomListStyle(style, list.isOrdered);
+      final level = item.level.clamp(0, 8);
+      counters.removeWhere((l, _) => l > level);
 
-        final decodedText = PdfContentBuilder.decodeHtmlEntities(child.content);
-        final lines = decodedText.split('\n');
-
-        for (var lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-          final line = lines[lineIdx];
-
-          for (final word in line.split(' ')) {
-            if (word.isNotEmpty) {
-              // Check for checkboxes
-              bool isCheckbox = false;
-              int? checkboxType;
-              if (word == '\u2610') {
-                isCheckbox = true;
-                checkboxType = 0;
-              } else if (word == '\u2611') {
-                isCheckbox = true;
-                checkboxType = 1;
-              } else if (word == '\u2612') {
-                isCheckbox = true;
-                checkboxType = 2;
-              }
-
-              // Calculate width - handle custom font size and superscript/subscript
-              var effFontSize = (child.fontSize ?? fontSize).toDouble();
-              if (child.isSuperscript || child.isSubscript) {
-                effFontSize *= 0.6;
-              }
-              final w = isCheckbox
-                  ? effFontSize
-                  : builder.measureText(word, effFontSize,
-                      isBold: child.isBold,
-                      fontRef: fontRef,
-                      fontManager: _fontManager);
-
-              words.add(_Word(
-                word,
-                fontRef,
-                color,
-                w.toDouble(),
-                isUnderline: child.isUnderline,
-                isStrike: child.isStrike,
-                backgroundColor: backgroundColor,
-                fontSize: child.fontSize,
-                isSuperscript: child.isSuperscript,
-                isSubscript: child.isSubscript,
-                isCheckbox: isCheckbox,
-                checkboxType: checkboxType,
-              ));
-            }
-          }
-
-          if (lineIdx < lines.length - 1) {
-            words.add(_Word.lineBreak());
-          }
-        }
-      }
-    }
-
-    if (words.isEmpty) {
-      return fontSize * 1.4; // Return default line height if empty
-    }
-
-    // 2. Flow words into lines based on cell width - use proper Helvetica space width (0.278)
-    final spaceWidth = fontSize * 0.278;
-    final splitWords =
-        _splitOverlongWords(words, width, fontSize.toDouble(), builder);
-    final lines = _flowWords(splitWords, width, spaceWidth);
-    final lineHeight = fontSize * 1.4;
-
-    // 3. Render each line
-    var currentY = y - fontSize * 0.3; // Align baseline
-    final decorations = <_TextDecoration>[];
-    for (final line in lines) {
-      if (line.isEmpty) {
-        currentY -= lineHeight;
-        continue;
+      String marker;
+      if (list.isOrdered) {
+        final start = level == 0 ? list.startIndex : 1;
+        final next = (counters[level] ?? (start - 1)) + 1;
+        counters[level] = next;
+        final format =
+            custom ? style.numberFormat : _defaultNumberFormats[level % 3];
+        marker = '${_formatListNumber(format, next)}.';
+      } else {
+        marker = custom ? style.bullet : _defaultBullets[level % 3];
       }
 
-      _drawWordLine(
-        builder: builder,
-        line: line,
-        startX: x,
-        lineMaxWidth: width,
-        y: currentY,
-        fontSize: fontSize.toDouble(),
-        spaceWidth: spaceWidth,
-        align: DocxAlign.left,
-        isLastLine: true,
-        decorations: decorations,
+      final itemFontSize = style.fontSize ?? fontSize0;
+      final indentTwips = style.indentPerLevel * (level + 1);
+      final synthetic = DocxParagraph(
+        children: item.children,
+        indentLeft: indentTwips,
       );
-
-      currentY -= lineHeight;
+      final pl = _layoutParagraph(synthetic, width,
+          kind: _ParaKind.listItem,
+          fontSizeOverride: itemFontSize,
+          register: register);
+      result.add(_ListItemLayout(
+        layout: pl,
+        marker: marker,
+        markerX: (indentTwips - style.hangingIndent) / 20.0,
+        markerColor:
+            style.color == DocxColor.black || style.color == DocxColor.auto
+                ? '000000'
+                : style.color.hex,
+        markerBold: style.fontWeight == DocxFontWeight.bold,
+        fontSize: itemFontSize,
+        nextTopLevel: (counters[0] ?? (list.startIndex - 1)) + 1,
+      ));
     }
-    _strokeDecorations(builder, decorations);
+    return result;
+  }
 
-    // Return total height used
-    return lines.length * lineHeight;
+  String _formatListNumber(DocxNumberFormat format, int n) {
+    switch (format) {
+      case DocxNumberFormat.lowerAlpha:
+        return _alpha(n).toLowerCase();
+      case DocxNumberFormat.upperAlpha:
+        return _alpha(n);
+      case DocxNumberFormat.lowerRoman:
+        return _roman(n).toLowerCase();
+      case DocxNumberFormat.upperRoman:
+        return _roman(n);
+      default:
+        return '$n';
+    }
+  }
+
+  static String _alpha(int n) {
+    if (n <= 0) return '$n';
+    var value = n;
+    final buf = StringBuffer();
+    while (value > 0) {
+      value--;
+      buf.write(String.fromCharCode(65 + value % 26));
+      value ~/= 26;
+    }
+    return buf.toString().split('').reversed.join();
+  }
+
+  static String _roman(int n) {
+    if (n <= 0 || n >= 4000) return '$n';
+    const values = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1];
+    const symbols = [
+      'M',
+      'CM',
+      'D',
+      'CD',
+      'C',
+      'XC',
+      'L',
+      'XL',
+      'X',
+      'IX',
+      'V',
+      'IV',
+      'I'
+    ];
+    var value = n;
+    final buf = StringBuffer();
+    for (var i = 0; i < values.length; i++) {
+      while (value >= values[i]) {
+        buf.write(symbols[i]);
+        value -= values[i];
+      }
+    }
+    return buf.toString();
   }
 
   double _renderList(
@@ -1860,151 +1993,34 @@ class PdfExporter {
     double startY,
     PdfLayoutEngine layout,
   ) {
+    return _drawList(list, builder, startX, startY, layout.contentWidth) -
+        fontSize0 * 0.5;
+  }
+
+  /// Draws [list] in a box [width] wide at ([startX], [startY]); returns
+  /// the y below its last item.
+  double _drawList(DocxList list, PdfContentBuilder builder, double startX,
+      double startY, double width) {
     var y = startY;
-    var index = list.startIndex;
-    final lineHeight = fontSize * 1.5;
-    final bulletIndent = 36.0;
-    final textIndent = 24.0;
-
-    for (final item in list.items) {
-      final levelIndent = item.level * bulletIndent;
-      final markerX = startX + levelIndent;
-      final contentX = markerX + textIndent;
-      final availableWidth =
-          layout.contentWidth - (contentX - layout.marginLeft);
-
-      // Draw bullet/number marker
-      final marker = list.isOrdered ? '${index++}.' : '\x95';
-      builder.beginText();
-      builder.setTextMatrix(markerX, y);
-      builder.setFont(PdfFontManager.fontRegular, fontSize.toDouble());
-      builder.setFillColorHex('000000');
-      builder.showText(marker);
-      builder.endText();
-
-      // Collect all words
-      final words = <_Word>[];
-      for (final child in item.children) {
-        if (child is DocxText) {
-          final fontRef = _withUnicodeFallback(
-            _fontManager.selectFont(
-              isBold: child.isBold,
-              isItalic: child.isItalic,
-              fontFamily: child.fontFamily,
-            ),
-            child.content,
-            child.fontFamily,
-          );
-          final color = child.effectiveColorHex ?? '000000';
-
-          String? backgroundColor;
-          if (child.highlight != DocxHighlight.none) {
-            backgroundColor = _highlightToHex(child.highlight);
-          } else if (child.shadingFill != null && child.shadingFill != 'auto') {
-            backgroundColor = child.shadingFill;
-          }
-
-          // Decode HTML entities and handle newlines
-          final decodedText =
-              PdfContentBuilder.decodeHtmlEntities(child.content);
-          final textLines = decodedText.split('\n');
-
-          for (var lineIdx = 0; lineIdx < textLines.length; lineIdx++) {
-            final line = textLines[lineIdx];
-            final parts = line.split(' ');
-            for (var i = 0; i < parts.length; i++) {
-              final word = parts[i];
-              if (word.isNotEmpty) {
-                // Check for checkboxes
-                bool isCheckbox = false;
-                int? checkboxType;
-                if (word == '\u2610') {
-                  isCheckbox = true;
-                  checkboxType = 0;
-                } else if (word == '\u2611') {
-                  isCheckbox = true;
-                  checkboxType = 1;
-                } else if (word == '\u2612') {
-                  isCheckbox = true;
-                  checkboxType = 2;
-                }
-
-                // Calculate width - handle superscript/subscript
-                var effFontSize = (child.fontSize ?? fontSize).toDouble();
-                if (child.isSuperscript || child.isSubscript) {
-                  effFontSize *= 0.6;
-                }
-                final w = isCheckbox
-                    ? effFontSize
-                    : builder.measureText(word, effFontSize,
-                        isBold: child.isBold,
-                        fontRef: fontRef,
-                        fontManager: _fontManager);
-
-                words.add(_Word(
-                  word,
-                  fontRef,
-                  color,
-                  w,
-                  isUnderline: child.isUnderline,
-                  isStrike: child.isStrike,
-                  backgroundColor: backgroundColor,
-                  fontSize: child.fontSize,
-                  isSuperscript: child.isSuperscript,
-                  isSubscript: child.isSubscript,
-                  isCheckbox: isCheckbox,
-                  checkboxType: checkboxType,
-                ));
-              }
-            }
-
-            if (lineIdx < textLines.length - 1) {
-              words.add(_Word.lineBreak());
-            }
-          }
-        }
+    for (final item in _layoutList(list, width, register: true)) {
+      final pl = item.layout;
+      if (pl.lines.isNotEmpty) {
+        final baseline =
+            y - pl.spaceBefore - pl.padTop - pl.lines.first.baseline;
+        final markerFont = _withUnicodeFallback(
+            _fontManager.selectFont(isBold: item.markerBold),
+            item.marker,
+            null);
+        builder.beginText();
+        builder.setTextMatrix(startX + math.max(0, item.markerX), baseline);
+        builder.setFont(markerFont, item.fontSize);
+        builder.setFillColorHex(item.markerColor);
+        builder.showText(item.marker);
+        builder.endText();
       }
-
-      if (words.isNotEmpty) {
-        final spaceWidth = fontSize * 0.278;
-        final splitWords = _splitOverlongWords(
-            words, availableWidth, fontSize.toDouble(), builder);
-        final lines = _flowWords(splitWords, availableWidth, spaceWidth);
-
-        // Render list item lines
-        var currentY = y - fontSize * 0.3; // Align baseline (approx)
-        final decorations = <_TextDecoration>[];
-        for (final line in lines) {
-          if (line.isEmpty) {
-            currentY -= lineHeight;
-            continue;
-          }
-
-          _drawWordLine(
-            builder: builder,
-            line: line,
-            startX: contentX,
-            lineMaxWidth: availableWidth,
-            y: currentY,
-            fontSize: fontSize.toDouble(),
-            spaceWidth: spaceWidth,
-            align: DocxAlign.left,
-            isLastLine: true,
-            decorations: decorations,
-          );
-
-          currentY -= lineHeight;
-        }
-        _strokeDecorations(builder, decorations);
-        y = currentY;
-      } else {
-        y -= lineHeight;
-      }
-
-      y -= fontSize * 0.2;
+      y = _drawParagraph(pl, builder, startX, y);
     }
-
-    return y - 10;
+    return y;
   }
 
   double _renderImage(
@@ -2012,8 +2028,9 @@ class PdfExporter {
     PdfContentBuilder builder,
     double x,
     double y,
-    PdfLayoutEngine layout,
-  ) {
+    PdfLayoutEngine layout, {
+    double? availableWidth,
+  }) {
     final writer = _writer;
     final bytes = image.bytes;
     if (writer == null) return y;
@@ -2028,21 +2045,24 @@ class PdfExporter {
     final imageName = '/Im${++_imageCount}';
     _pageImages[imageName] = imageId;
 
-    final renderHeight = image.height;
-    final renderWidth = image.width; // Or scale if needed
+    // Images wider than the available width are scaled down to fit,
+    // keeping their aspect ratio (see PdfLayoutEngine.measureNode).
+    final maxWidth = availableWidth ?? layout.contentWidth;
+    final scale = image.width > maxWidth && image.width > 0
+        ? maxWidth / image.width
+        : 1.0;
+    final renderWidth = image.width * scale;
+    final renderHeight = image.height * scale;
 
     // Calculate X position based on alignment (mirrors _renderShapeBlock).
     var drawX = x;
     if (image.align == DocxAlign.center) {
-      drawX = x + (layout.contentWidth - renderWidth) / 2;
+      drawX = x + (maxWidth - renderWidth) / 2;
     } else if (image.align == DocxAlign.right) {
-      drawX = x + layout.contentWidth - renderWidth;
+      drawX = x + maxWidth - renderWidth;
     }
 
-    // Draw image
-    // Note: PDF coordinates are bottom-up, so y is bottom-left of image
-    // But our y is top-down flow. We want top-left of image at y.
-    // So draw at y - height
+    // PDF coordinates are bottom-up: draw with the image's top at y.
     builder.drawImage(
         imageName, drawX, y - renderHeight, renderWidth, renderHeight);
     _drawImageBorder(builder, image.border, drawX, y - renderHeight,
@@ -2065,24 +2085,25 @@ class PdfExporter {
     builder.restoreState();
   }
 
-  /// Registers a [DocxInlineImage] (an inline paragraph run, not a
-  /// block-level [DocxImage]) as a page XObject and returns a placeholder
-  /// "word" for it so it flows into the surrounding text like any other
-  /// word instead of being silently skipped.
-  _Word? _registerInlineImage(DocxInlineImage image) {
+  /// Returns a placeholder "word" for a [DocxInlineImage] so it flows into
+  /// the surrounding text like any other word. With [register] the image
+  /// is also added to the PDF as a page XObject; measurement-only layout
+  /// passes skip that so pagination doesn't embed images twice.
+  _Word _inlineImageWord(
+      DocxInlineImage image, bool register, int srcIndex, double gap) {
+    String? imageName;
     final writer = _writer;
-    if (writer == null) return null;
-
-    final imageId = writer.addImage(
-      bytes: image.bytes,
-      width: image.width.toInt(),
-      height: image.height.toInt(),
-    );
-    final imageName = '/Im${++_imageCount}';
-    _pageImages[imageName] = imageId;
-
+    if (register && writer != null) {
+      final imageId = writer.addImage(
+        bytes: image.bytes,
+        width: image.width.toInt(),
+        height: image.height.toInt(),
+      );
+      imageName = '/Im${++_imageCount}';
+      _pageImages[imageName] = imageId;
+    }
     return _Word.image(imageName, image.width, image.height,
-        imageBorder: image.border);
+        border: image.border, gap: gap, srcIndex: srcIndex);
   }
 
   List<_SectionData> _splitSections(DocxBuiltDocument doc) {
@@ -2183,6 +2204,8 @@ class _ResolvedBorder {
   const _ResolvedBorder(this.colorHex, this.widthPt);
 }
 
+/// One flowable unit of a line: a word of text, a checkbox, an inline
+/// image/shape, a tab, or a hard line break.
 class _Word {
   final String text;
   final String fontRef;
@@ -2191,6 +2214,19 @@ class _Word {
   final bool isTab;
   final bool isBreak;
 
+  /// Whitespace width before this word when it isn't first on its line
+  /// (0 when glued to the previous word).
+  final double gap;
+
+  /// Leading indentation kept when this word starts a line after a hard
+  /// break (e.g. indented code).
+  final double lineStartGap;
+
+  /// True when no whitespace separates this word from the previous one in
+  /// the source (`Word<b>glued</b>`, a split chunk excluded): the line
+  /// breaker keeps the two together.
+  final bool noBreakBefore;
+
   // Text decorations
   final bool isUnderline;
   final bool isStrike;
@@ -2198,7 +2234,7 @@ class _Word {
   // Background color (from highlight or shadingFill)
   final String? backgroundColor;
 
-  // Font adjustments
+  // Font adjustments (run font size before any sub/superscript scaling)
   final double? fontSize;
   final bool isSuperscript;
   final bool isSubscript;
@@ -2210,7 +2246,8 @@ class _Word {
   // Hyperlink target, if this word came from a DocxText with an href.
   final String? href;
 
-  // Inline image, if this "word" is actually a DocxInlineImage.
+  // Inline image, if this "word" is actually a DocxInlineImage. The
+  // XObject name is null during measurement-only layout.
   final bool isImage;
   final String? imageXObjectName;
   final double imageHeight;
@@ -2220,18 +2257,23 @@ class _Word {
   final bool isShape;
   final DocxShape? shape;
 
-  /// True if this word is a continuation chunk of a single original word
-  /// that was too wide to fit on one line and was split by
-  /// [PdfExporter._splitOverlongWords] - the line-flow/draw logic must not
-  /// insert a space before it (it's a piece of one word, not a new word),
-  /// though a line break is still allowed between chunks.
-  final bool glueToPrevious;
+  /// Source position (paragraph child index and character offset in the
+  /// run's text), used to split a paragraph exactly at a line boundary.
+  final int srcIndex;
+  final int srcOffset;
 
-  _Word(
+  /// True for a break produced by a [DocxLineBreak] child (as opposed to a
+  /// newline inside a run's text).
+  final bool isChildBreak;
+
+  const _Word(
     this.text,
     this.fontRef,
     this.color,
     this.width, {
+    this.gap = 0,
+    this.lineStartGap = 0,
+    this.noBreakBefore = false,
     this.isUnderline = false,
     this.isStrike = false,
     this.backgroundColor,
@@ -2241,105 +2283,167 @@ class _Word {
     this.isCheckbox = false,
     this.checkboxType,
     this.href,
-    this.glueToPrevious = false,
-  })  : isTab = false,
-        isBreak = false,
-        isImage = false,
-        imageXObjectName = null,
-        imageHeight = 0,
-        imageBorder = null,
-        isShape = false,
-        shape = null;
+    this.srcIndex = 0,
+    this.srcOffset = 0,
+    this.isTab = false,
+    this.isBreak = false,
+    this.isImage = false,
+    this.imageXObjectName,
+    this.imageHeight = 0,
+    this.imageBorder,
+    this.isShape = false,
+    this.shape,
+    this.isChildBreak = false,
+  });
 
-  _Word.tab(this.width)
-      : text = '',
-        fontRef = '',
-        color = '',
-        isTab = true,
-        isBreak = false,
-        isUnderline = false,
-        isStrike = false,
-        backgroundColor = null,
-        fontSize = null,
-        isSuperscript = false,
-        isSubscript = false,
-        isCheckbox = false,
-        checkboxType = null,
-        href = null,
-        isImage = false,
-        imageXObjectName = null,
-        imageHeight = 0,
-        imageBorder = null,
-        isShape = false,
-        shape = null,
-        glueToPrevious = false;
+  static _Word tab({int srcIndex = 0}) =>
+      _Word('', '', '', 0, isTab: true, srcIndex: srcIndex);
 
-  _Word.lineBreak()
-      : text = '',
-        fontRef = '',
-        color = '',
-        width = 0,
-        isTab = false,
-        isBreak = true,
-        isUnderline = false,
-        isStrike = false,
-        backgroundColor = null,
-        fontSize = null,
-        isSuperscript = false,
-        isSubscript = false,
-        isCheckbox = false,
-        checkboxType = null,
-        href = null,
-        isImage = false,
-        imageXObjectName = null,
-        imageHeight = 0,
-        imageBorder = null,
-        isShape = false,
-        shape = null,
-        glueToPrevious = false;
+  static _Word lineBreak(
+          {int srcIndex = 0, int srcOffset = 0, bool isChildBreak = false}) =>
+      _Word('', '', '', 0,
+          isBreak: true,
+          srcIndex: srcIndex,
+          srcOffset: srcOffset,
+          isChildBreak: isChildBreak);
 
-  _Word.image(this.imageXObjectName, this.width, this.imageHeight,
-      {this.imageBorder})
-      : text = '',
-        fontRef = '',
-        color = '',
-        isTab = false,
-        isBreak = false,
-        isUnderline = false,
-        isStrike = false,
-        backgroundColor = null,
-        fontSize = null,
-        isSuperscript = false,
-        isSubscript = false,
-        isCheckbox = false,
-        checkboxType = null,
-        href = null,
-        isImage = true,
-        isShape = false,
-        shape = null,
-        glueToPrevious = false;
+  static _Word image(String? name, double width, double height,
+          {DocxBorderSide? border, double gap = 0, int srcIndex = 0}) =>
+      _Word('', '', '', width,
+          isImage: true,
+          imageXObjectName: name,
+          imageHeight: height,
+          imageBorder: border,
+          gap: gap,
+          srcIndex: srcIndex);
 
-  _Word.shape(this.shape, this.width)
-      : text = '',
-        fontRef = '',
-        color = '',
-        isTab = false,
-        isBreak = false,
-        isUnderline = false,
-        isStrike = false,
-        backgroundColor = null,
-        fontSize = null,
-        isSuperscript = false,
-        isSubscript = false,
-        isCheckbox = false,
-        checkboxType = null,
-        href = null,
-        isImage = false,
-        imageXObjectName = null,
-        imageHeight = 0,
-        imageBorder = null,
-        isShape = true,
-        glueToPrevious = false;
+  static _Word shapeWord(DocxShape shape, double width,
+          {double gap = 0, int srcIndex = 0}) =>
+      _Word('', '', '', width,
+          isShape: true, shape: shape, gap: gap, srcIndex: srcIndex);
+
+  _Word withWidth(double newWidth) => _Word(text, fontRef, color, newWidth,
+      gap: gap,
+      lineStartGap: lineStartGap,
+      noBreakBefore: noBreakBefore,
+      isTab: isTab,
+      srcIndex: srcIndex,
+      srcOffset: srcOffset);
+
+  _Word copyWithText(String newText, double newWidth,
+          {required double gap,
+          required bool noBreakBefore,
+          required int srcOffset}) =>
+      _Word(newText, fontRef, color, newWidth,
+          gap: gap,
+          lineStartGap: gap == 0 ? 0 : lineStartGap,
+          noBreakBefore: noBreakBefore,
+          isUnderline: isUnderline,
+          isStrike: isStrike,
+          backgroundColor: backgroundColor,
+          fontSize: fontSize,
+          isSuperscript: isSuperscript,
+          isSubscript: isSubscript,
+          href: href,
+          srcIndex: srcIndex,
+          srcOffset: srcOffset);
+}
+
+/// A flowed line and its resolved metrics.
+class _Line {
+  final List<_Word> words = [];
+
+  /// True for the first line of a paragraph or a line after a hard break.
+  final bool afterBreak;
+
+  /// Where this line starts in the paragraph's children (see
+  /// [_Word.srcIndex]); [srcAfterChild] means "after child [srcIndex]".
+  final int srcIndex;
+  final int srcOffset;
+  final bool srcAfterChild;
+
+  double height = 0;
+
+  /// Distance from the line's top to its baseline.
+  double baseline = 0;
+
+  _Line({
+    required this.afterBreak,
+    required this.srcIndex,
+    required this.srcOffset,
+    this.srcAfterChild = false,
+  });
+}
+
+/// Where a paragraph appears, which picks its default spacing.
+enum _ParaKind { body, cell, listItem }
+
+/// A paragraph laid out into lines, with all box metrics in points.
+class _ParaLayout {
+  final DocxParagraph paragraph;
+  final double fontSize;
+  final List<_Line> lines;
+  final double spaceBefore;
+  final double spaceAfter;
+  final double padTop;
+  final double padBottom;
+  final double padLeft;
+  final double padRight;
+  final double indentLeft;
+  final double firstLineIndent;
+  final double textWidth;
+
+  _ParaLayout({
+    required this.paragraph,
+    required this.fontSize,
+    required this.lines,
+    required this.spaceBefore,
+    required this.spaceAfter,
+    required this.padTop,
+    required this.padBottom,
+    required this.padLeft,
+    required this.padRight,
+    required this.indentLeft,
+    required this.firstLineIndent,
+    required this.textWidth,
+  });
+
+  double get linesHeight => lines.fold<double>(0, (sum, l) => sum + l.height);
+
+  double get height =>
+      spaceBefore + padTop + linesHeight + padBottom + spaceAfter;
+}
+
+class _ListItemLayout {
+  final _ParaLayout layout;
+  final String marker;
+  final double markerX;
+  final String markerColor;
+  final bool markerBold;
+  final double fontSize;
+  final int nextTopLevel;
+
+  _ListItemLayout({
+    required this.layout,
+    required this.marker,
+    required this.markerX,
+    required this.markerColor,
+    required this.markerBold,
+    required this.fontSize,
+    required this.nextTopLevel,
+  });
+}
+
+class _Insets {
+  final double left;
+  final double top;
+  final double right;
+  final double bottom;
+
+  const _Insets(this.left, this.top, this.right, this.bottom);
+
+  double get horizontal => left + right;
+  double get vertical => top + bottom;
 }
 
 /// A fully-rendered page's content stream plus everything [PdfExporter]
@@ -2383,19 +2487,19 @@ class _PendingLink {
   });
 }
 
-/// Helper class to track text decoration positions for underline/strikethrough
+/// An underline/strikethrough rule collected while drawing a line.
 class _TextDecoration {
   final double x;
   final double y;
   final double width;
   final String color;
-  final bool isStrike;
+  final double thickness;
 
   const _TextDecoration({
     required this.x,
     required this.y,
     required this.width,
     required this.color,
-    required this.isStrike,
+    required this.thickness,
   });
 }

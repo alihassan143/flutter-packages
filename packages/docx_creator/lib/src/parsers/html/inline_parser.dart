@@ -53,9 +53,15 @@ class HtmlInlineParser {
           return [DocxLineBreak()];
         case 'a':
           final href = node.attributes['href'];
+          // Links are blue unless the author styled their colour (browsers
+          // and Word both override the inherited text colour for links).
+          final linkColor =
+              ColorUtils.parseCssColorProperty(combinedStyle, 'color') ??
+                  (href != null ? '0563C1' : null);
           // Sync version can't handle nested async stuff well, but we do our best
           return parseInlinesSync(node.nodes,
-              context: newCtx.copyWith(href: href ?? '#', isLink: true));
+              context: newCtx.copyWith(
+                  href: href ?? '#', isLink: true, colorHex: linkColor));
         case 'input':
           return _parseInput(node, newCtx);
         case 'code':
@@ -90,8 +96,14 @@ class HtmlInlineParser {
           return [DocxLineBreak()];
         case 'a':
           final href = node.attributes['href'];
+          // Links are blue unless the author styled their colour (browsers
+          // and Word both override the inherited text colour for links).
+          final linkColor =
+              ColorUtils.parseCssColorProperty(combinedStyle, 'color') ??
+                  (href != null ? '0563C1' : null);
           return await parseInlines(node.nodes,
-              context: newCtx.copyWith(href: href ?? '#', isLink: true));
+              context: newCtx.copyWith(
+                  href: href ?? '#', isLink: true, colorHex: linkColor));
         case 'img':
           final img = await _imageParser.parseInlineImage(node);
           return img != null ? [img] : [];

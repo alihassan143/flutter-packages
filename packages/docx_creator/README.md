@@ -48,14 +48,14 @@ A **developer-first DOCX generation library** for Dart. Create, parse, read, and
 | Theme color/tint/shade (text and shading) | ✅ | ⚠️ resolved to its literal hex where set; PDF has no OOXML theme palette to resolve `accent1` etc. against |
 | Custom/embedded fonts (TTF) | ✅ (OOXML-obfuscated) | ✅ (embedded with correct glyph widths & ToUnicode; used in paragraphs, table cells, and lists) |
 | Paragraph alignment (left/center/right/justify) | ✅ | ✅ |
-| Paragraph spacing, left/right indent, padding | ✅ | ✅ |
+| Paragraph spacing, line spacing (auto/exact/atLeast), left/right/first-line indent, padding | ✅ | ✅ |
 | Paragraph borders (incl. `<hr>`, blockquote rules) | ✅ | ✅ (actually drawn, not just spaced) |
 | `pageBreakBefore` | ✅ | ✅ |
-| Bullet/numbered lists, 9 levels, nested, custom bullets/formats, image bullets | ✅ | ✅ top-level; nested lists **inside table cells** render as plain text (formatting simplified) |
+| Bullet/numbered lists, 9 levels, nested, custom bullets/formats, image bullets | ✅ | ✅ per-level bullets/number formats matching the DOCX numbering, also inside table cells; lists split across pages; image bullets render as the default bullet |
 | Tables: merged cells (colSpan/rowSpan) | ✅ | ✅ (correct grid placement, no overlap) |
 | Tables: per-cell/table borders, incl. "no border" styles | ✅ | ✅ |
 | Tables: real column widths | ✅ | ✅ |
-| Tables: cell shading, margins, conditional formatting | ✅ | ✅ shading; margins/cnfStyle not visually distinct in PDF |
+| Tables: cell shading, margins, vertical alignment, conditional formatting | ✅ | ✅ shading, margins and vertical alignment; cnfStyle not visually distinct in PDF |
 | Tables: nested tables/lists inside cells | ✅ | ✅ |
 | Tables spanning multiple pages | N/A (Word reflows natively) | ✅ splits by row automatically |
 | Images: inline & floating, wrapping, alignment | ✅ | ✅ (floating-specific wrap/z-order collapses to normal inline flow in PDF) |
