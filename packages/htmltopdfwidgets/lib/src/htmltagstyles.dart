@@ -56,14 +56,11 @@ class HtmlTagStyle {
   /// This value determines how thick the divider line will be.
   final double dividerthickness;
 
-  /// The background color of the code block.
-  ///
-  /// This color is used as the background for code blocks in the PDF.
+  /// The background color of inline `<code>` spans.
   final PdfColor codeBlockBackgroundColor;
 
-  /// The color of the code block text.
-  ///
-  /// This color is used for the text within code blocks in the PDF.
+  /// The background color of `<pre>` code blocks (ignored when
+  /// [codeDecoration] is set).
   final PdfColor codeblockColor;
   // The decoration style that will merge with default style
   final BoxDecoration? codeDecoration;
@@ -130,8 +127,8 @@ class HtmlTagStyle {
     this.bulletListIconColor,
     this.dividerBorderStyle,
     this.dividerHight = 0.5,
-    this.codeBlockBackgroundColor = PdfColors.red,
-    this.codeblockColor = PdfColors.grey,
+    this.codeBlockBackgroundColor = PdfColors.grey200,
+    this.codeblockColor = PdfColors.grey200,
     this.codeDecoration,
     this.dividerthickness = 1.0,
     this.dividerColor = PdfColors.grey,
