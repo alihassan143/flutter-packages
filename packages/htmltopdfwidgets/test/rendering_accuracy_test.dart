@@ -266,6 +266,65 @@ void main() {
     });
   });
 
+  group('Review fixes', () {
+    RenderNode parse(String html) => HtmlParser(htmlString: html).parse();
+
+    test('a rule after @import/@charset is not dropped', () {
+      final root = parse('<style>@charset "utf-8"; @import url(x.css); '
+          'p { color: #ff0000 }</style><p>x</p>');
+      expect(_find(root, 'p').style.color, const PdfColor(1, 0, 0));
+    });
+
+    test('&nbsp; is kept (spacer paragraphs and indentation)', () async {
+      expect(await _lines('<p>&nbsp;</p>'), [' ']);
+      expect(
+          await _lines('<p><b>a</b>&nbsp;&nbsp;&nbsp;<b>b</b></p>'), ['a   b']);
+    });
+
+    test('nested lists get their own default marker type', () {
+      final root = parse('<ul style="list-style-type: square"><li>x'
+          '<ol><li>y<ul><li>z</li></ul></li></ol></li></ul>');
+      expect(_find(root, 'ol').style.listStyleType, 'decimal');
+      // ul inside ul/ol ancestors (depth 2) cycles to "square".
+      final inner = _find(_find(root, 'ol'), 'ul');
+      expect(inner.style.listStyleType, 'square');
+      expect(
+          parse('<ul><li><ul><li>a</li></ul></li></ul>')
+              .children
+              .first
+              .children
+              .first
+              .children
+              .firstWhere((c) => c.tagName == 'ul')
+              .style
+              .listStyleType,
+          'circle');
+    });
+
+    test('margin-left/right: auto centers the block', () {
+      expect(
+          CSSStyle.parse('width: 100pt; margin-left: auto; margin-right: auto')
+              .centerHorizontally,
+          isTrue);
+      expect(CSSStyle.parse('margin-left: auto').centerHorizontally, isNull);
+    });
+
+    test('<hr> uses the first visible border side', () async {
+      final widgets = await HTMLToPdf()
+          .convert('<hr style="border: 0; border-top: 2pt solid #ff0000">');
+      Divider? divider;
+      void walk(Widget? w) {
+        if (w is Divider) divider = w;
+        if (w is SingleChildWidget) walk(w.child);
+      }
+
+      widgets.forEach(walk);
+      expect(divider, isNotNull);
+      expect(divider!.thickness, 2);
+      expect(divider!.color, const PdfColor(1, 0, 0));
+    });
+  });
+
   test('a mixed document lays out into a multi-page PDF', () async {
     final buffer = StringBuffer('<h1>Title</h1>');
     for (var i = 0; i < 40; i++) {

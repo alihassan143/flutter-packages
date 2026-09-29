@@ -517,8 +517,15 @@ class CSSStyle {
             bottom: side == 'bottom' ? v : 0,
             left: side == 'left' ? v : 0,
           );
+          final bothAuto = isMargin &&
+              (side == 'left' || side == 'right') &&
+              declarations['margin-left']?.trim().toLowerCase() == 'auto' &&
+              declarations['margin-right']?.trim().toLowerCase() == 'auto';
           style = style.merge(isMargin
-              ? CSSStyle(margin: insets, marginMask: mask)
+              ? CSSStyle(
+                  margin: insets,
+                  marginMask: mask,
+                  centerHorizontally: bothAuto ? true : null)
               : CSSStyle(padding: insets, paddingMask: mask));
           break;
         case 'border':

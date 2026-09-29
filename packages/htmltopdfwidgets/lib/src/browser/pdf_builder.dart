@@ -158,9 +158,14 @@ class PdfBuilder {
         return _Block(await _buildTable(node),
             marginTop: marginTop, marginBottom: marginBottom);
       case 'hr':
-        final side = style.resolvedBorder?.bottom ??
-            style.resolvedBorder?.top ??
-            const pw.BorderSide(width: 1, color: PdfColors.grey);
+        final rb = style.resolvedBorder;
+        bool visible(pw.BorderSide s) => s.style.paint && s.width > 0;
+        // First *visible* side: `border: 0; border-top: 1px solid` leaves
+        // an invisible (non-null) bottom side.
+        final side = rb == null
+            ? const pw.BorderSide(width: 1, color: PdfColors.grey)
+            : [rb.bottom, rb.top, rb.left, rb.right]
+                .firstWhere(visible, orElse: () => rb.bottom);
         return _Block([
           _horizontalMargins(
               pw.Divider(
@@ -422,7 +427,7 @@ class PdfBuilder {
   /// into several widgets so it can flow across pages.
   List<pw.Widget> _richTextWidgets(
       List<pw.InlineSpan> input, CSSStyle blockStyle) {
-    final spans = _trimTrailingSpace(input);
+    final spans = _nbspToSpace(_trimTrailingSpace(input));
     if (spans.isEmpty) return [];
 
     final textAlign = blockStyle.textAlign ?? pw.TextAlign.left;
@@ -448,6 +453,21 @@ class PdfBuilder {
     return total;
   }
 
+  /// Renders non-breaking spaces as plain spaces (many PDF fonts lack a
+  /// U+00A0 glyph). Runs after trimming so `&nbsp;` is never collapsed away.
+  List<pw.InlineSpan> _nbspToSpace(List<pw.InlineSpan> spans) => [
+        for (final s in spans)
+          if (s is pw.TextSpan && (s.text?.contains('\u00A0') ?? false))
+            pw.TextSpan(
+              text: s.text!.replaceAll('\u00A0', ' '),
+              style: s.style,
+              baseline: s.baseline,
+              annotation: s.annotation,
+            )
+          else
+            s
+      ];
+
   /// Removes collapsible trailing whitespace (and drops a content-free run).
   List<pw.InlineSpan> _trimTrailingSpace(List<pw.InlineSpan> spans) {
     final result = [...spans];
@@ -470,8 +490,11 @@ class PdfBuilder {
       }
       break;
     }
-    final hasContent = result
-        .any((s) => s is! pw.TextSpan || (s.text ?? '').trim().isNotEmpty);
+    // Only ASCII whitespace is collapsible; Dart's trim() would also strip
+    // U+00A0 and drop `<p>&nbsp;</p>` spacer lines.
+    final hasContent = result.any((s) =>
+        s is! pw.TextSpan ||
+        (s.text ?? '').replaceAll(RegExp(r'[ \t\n\r\f]'), '').isNotEmpty);
     return hasContent ? result : const [];
   }
 
@@ -541,9 +564,8 @@ class PdfBuilder {
       if (text.isEmpty) return '';
       ctx.lastWasSpace = text.endsWith(' ') || text.endsWith('\n');
     }
-    // Non-breaking spaces survive collapsing, then render as plain spaces
-    // (many PDF fonts lack a dedicated U+00A0 glyph).
-    text = text.replaceAll(' ', ' ');
+    // Non-breaking spaces survive collapsing and trimming; [_nbspToSpace]
+    // turns them into plain spaces once lines are assembled.
     return _transform(text, style.textTransform);
   }
 
@@ -736,6 +758,7 @@ class PdfBuilder {
         ];
       }
     }
+    spans = _nbspToSpace(spans);
     if (spans.isEmpty) return _decorateBlock(node, const _Flow([], 0, 0));
 
     // Chunk by lines so long listings can break across pages.

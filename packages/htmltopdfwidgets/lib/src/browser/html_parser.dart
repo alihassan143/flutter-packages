@@ -88,9 +88,15 @@ class HtmlParser {
     // Cascade: inherited -> tag defaults -> presentational attributes ->
     // <style> rules (by specificity/order) -> inline style -> !important.
     var computedStyle = const CSSStyle().inheritFrom(parentStyle);
+    var listDepth = 0;
+    for (var a = element.parent; a != null; a = a.parent) {
+      final name = a.localName?.toLowerCase();
+      if (name == 'ul' || name == 'ol' || name == 'menu') listDepth++;
+    }
     computedStyle = computedStyle.merge(_getDefaultStyleForTag(
         tag, parentFontSize,
-        parentTag: (element.parent?.localName ?? '').toLowerCase()));
+        parentTag: (element.parent?.localName ?? '').toLowerCase(),
+        listDepth: listDepth));
 
     final declarations = <String, String>{};
     void put(Map<String, String> source) {
@@ -134,7 +140,7 @@ class HtmlParser {
       } else if (node is dom.Text) {
         var text = node.text;
         if (text.isEmpty) continue;
-        if (!preserveWhitespace && text.trim().isEmpty) {
+        if (!preserveWhitespace && RegExp(r'^[ \t\n\r\f]*$').hasMatch(text)) {
           // Whitespace between elements is significant inline (it separates
           // words); the builder drops it at line starts/ends and between
           // blocks.
@@ -198,12 +204,12 @@ class HtmlParser {
   /// Replaces problematic characters with safe alternatives.
   String _sanitizeText(String text) {
     return text
-        .replaceAll('‑', '-') // Non-breaking hyphen
-        .replaceAll('​', '') // Zero width space
-        .replaceAll('‌', '') // Zero width non-joiner
-        .replaceAll('‍', '') // Zero width joiner
-        .replaceAll(' ', ' ') // Narrow no-break space
-        .replaceAll('﻿', ''); // Byte order mark
+        .replaceAll('\u2011', '-') // Non-breaking hyphen
+        .replaceAll('\u200B', '') // Zero width space
+        .replaceAll('\u200C', '') // Zero width non-joiner
+        .replaceAll('\u200D', '') // Zero width joiner
+        .replaceAll('\u202F', '\u00A0') // Narrow no-break space
+        .replaceAll('\uFEFF', ''); // Byte order mark
   }
 
   EdgeInsets _vMargin(double top, double bottom) =>
@@ -215,7 +221,7 @@ class HtmlParser {
   ///
   /// This method also applies overrides from [tagStyle].
   CSSStyle _getDefaultStyleForTag(String tagName, double parentFontSize,
-      {String parentTag = ''}) {
+      {String parentTag = '', int listDepth = 0}) {
     final em = parentFontSize;
     CSSStyle style;
     switch (tagName) {
@@ -308,6 +314,11 @@ class HtmlParser {
             parentTag == 'dd';
         style = CSSStyle(
             display: Display.block,
+            // Explicit per-list default so a parent list's type doesn't
+            // leak in through inheritance (like the UA stylesheet).
+            listStyleType: tagName == 'ol'
+                ? 'decimal'
+                : const ['disc', 'circle', 'square'][listDepth % 3],
             margin: nested ? _vMargin(0, 0) : _vMargin(em, em),
             padding: const EdgeInsets.only(left: 30.0)); // 40px
         if (tagStyle.listMargin != null) {

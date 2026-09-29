@@ -28,14 +28,18 @@ class CssStylesheet {
     while (i < css.length) {
       final open = css.indexOf('{', i);
       if (open < 0) break;
-      final prelude = css.substring(i, open).trim();
+      var prelude = css.substring(i, open).trim();
+      // Statement at-rules (`@charset ...;`, `@import ...;`) end at `;` and
+      // end up in front of the next rule's selector: drop them first.
+      if (prelude.contains(';')) {
+        prelude = prelude.substring(prelude.lastIndexOf(';') + 1).trim();
+      }
       final close = _matchingBrace(css, open);
       final body = css.substring(open + 1, close < 0 ? css.length : close);
       i = close < 0 ? css.length : close + 1;
 
       if (prelude.startsWith('@')) {
-        // `@import ...;` statements can precede a block in the prelude.
-        final at = prelude.substring(prelude.lastIndexOf('@'));
+        final at = prelude;
         if (at.startsWith('@media')) {
           final query = at.substring(6).toLowerCase();
           final screenOnly =
@@ -47,10 +51,7 @@ class CssStylesheet {
         continue;
       }
 
-      // Drop anything before a stray `;` (e.g. `@charset "x";` prefix).
-      final selectorText = prelude.contains(';')
-          ? prelude.substring(prelude.lastIndexOf(';') + 1).trim()
-          : prelude;
+      final selectorText = prelude;
       if (selectorText.isEmpty) continue;
 
       final normal = <String, String>{};
