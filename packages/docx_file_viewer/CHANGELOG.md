@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.5] - 2026-09-29
+
+### Fixed
+- **Web: "Unsupported operation: _Namespace" when loading a document** (#71). `DocxView(file:)` and `DocxView(path:)` read the document through `dart:io`'s `File`, which doesn't work in browsers and fails with that opaque error. On the web, `path` is now loaded as a Flutter asset, and `file` fails with a message explaining to pass `bytes` instead (e.g. file_picker's `withData: true`). Native platforms are unchanged.
+- Load failures are now also logged to the console with their stack trace, not only shown on screen.
+- The example app now opens picked files on the web (it read `PlatformFile.path`, which file_picker doesn't provide in browsers).
+
 ## [1.0.4] - 2026-09-13
 
 ### Added
