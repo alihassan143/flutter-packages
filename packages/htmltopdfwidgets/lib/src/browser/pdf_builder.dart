@@ -93,7 +93,7 @@ class PdfBuilder {
   // ---------------------------------------------------------------------------
 
   bool _isInlineLevel(LayoutNode node) {
-    if (node.tagName == 'math') return node.attributes['display'] != 'block';
+    if (node.tagName == 'math') return !_isBlockMath(node);
     if (node.tagName == '#text' || node.tagName == 'br') return true;
     if (node.tagName == 'input') {
       return node.attributes['type'] == 'checkbox';
@@ -548,10 +548,16 @@ class PdfBuilder {
     }
 
     if (node.tagName == 'math') {
+      final block = _isBlockMath(node);
       final box = _buildMath(node);
+      // Display math nested in inline content still gets a line of its own.
+      if (block && ctx.spans.isNotEmpty) {
+        ctx.spans.add(const pw.TextSpan(text: '\n'));
+      }
       // Put the formula's baseline on the text baseline.
       ctx.spans.add(pw.WidgetSpan(child: box.widget, baseline: -box.depth));
-      ctx.lastWasSpace = false;
+      if (block) ctx.spans.add(const pw.TextSpan(text: '\n'));
+      ctx.lastWasSpace = block;
       return;
     }
 
@@ -772,7 +778,11 @@ class PdfBuilder {
   MathBox _buildMath(LayoutNode node) => MathMLBuilder(
         textStyle: _mapTextStyle(node.style),
         fontFallback: fontFallback,
-      ).build(node);
+      ).build(node, display: _isBlockMath(node));
+
+  /// `<math display="block">` (case-insensitive) or CSS `display: block`.
+  bool _isBlockMath(LayoutNode node) =>
+      MathMLBuilder.isDisplayBlock(node) || node.style.display == Display.block;
 
   // ---------------------------------------------------------------------------
   // Specific blocks

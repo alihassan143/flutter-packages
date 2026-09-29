@@ -533,6 +533,9 @@ class HtmlParser {
 
     final color = attributes['color'];
     if (color != null) out['color'] = _legacyColor(color);
+    // MathML presentation color (inherits like CSS color).
+    final mathColor = attributes['mathcolor'];
+    if (mathColor != null) out['color'] = mathColor;
 
     if (tag == 'font') {
       final face = attributes['face'];

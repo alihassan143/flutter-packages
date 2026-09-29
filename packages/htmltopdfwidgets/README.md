@@ -165,7 +165,7 @@ final widgets = await HTMLToPdf().convert(
 | **Media** | `img` (Base64, Network, File) |
 | **Math (MathML)** | `math` (inline, or `display="block"`), `mfrac`, `msup`, `msub`, `msubsup`, `msqrt`, `mroot`, `munder`, `mover`, `munderover`, `mfenced`, `mtable`/`mtr`/`mtd`, `mi`, `mn`, `mo`, `mtext`, `mspace`, `mrow`, `semantics` |
 
-Math symbols outside Latin-1 (e.g. `∑`, `∫`, Greek letters) need a font that has them — pass one via `fontFallback`, as for any other non-Latin text.
+Sum, product and integral signs and radicals are drawn as vector shapes, so they work with any font. Other symbols outside Latin-1 (Greek letters, `≤`, `→`, ...) need a font that has them, passed via `fontFallback`; without one they fall back to readable text (`pi`, `<=`, `->`).
 
 ---
 
