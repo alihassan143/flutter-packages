@@ -163,6 +163,9 @@ final widgets = await HTMLToPdf().convert(
 | **Layout** | `table`, `thead`, `tbody`, `tr`, `th`, `td`, `blockquote` |
 | **Interactive** | `a` (links), `input[type="checkbox"]` |
 | **Media** | `img` (Base64, Network, File) |
+| **Math (MathML)** | `math` (inline, or `display="block"`), `mfrac`, `msup`, `msub`, `msubsup`, `msqrt`, `mroot`, `munder`, `mover`, `munderover`, `mfenced`, `mtable`/`mtr`/`mtd`, `mi`, `mn`, `mo`, `mtext`, `mspace`, `mrow`, `semantics` |
+
+Math symbols outside Latin-1 (e.g. `∑`, `∫`, Greek letters) need a font that has them — pass one via `fontFallback`, as for any other non-Latin text.
 
 ---
 
