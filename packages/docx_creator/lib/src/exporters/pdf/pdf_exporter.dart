@@ -1703,7 +1703,7 @@ class PdfExporter implements PdfBlockMeasurer {
 
   /// Row heights for placed rows: each row fits its single-row cells (and
   /// its explicit `height`); a rowSpan cell taller than the rows it spans
-  /// grows the last of them.
+  /// grows all of them.
   List<double> _tableRowHeights(
       DocxTable table, List<List<_CellPlacement>> placed) {
     final padding = table.style.cellPadding;
@@ -1718,26 +1718,38 @@ class PdfExporter implements PdfBlockMeasurer {
         }
       }
     }
+    // Like browsers, a rowSpan cell taller than its rows spreads the extra
+    // height over them in proportion to their heights (evenly when they
+    // are all empty), instead of stretching only the last one.
     for (final row in placed) {
       for (final p in row) {
         if (p.rowSpan <= 1) continue;
         final needed = _measureCell(p.cell, p.width, padding);
+        final end = p.row + p.rowSpan;
         var have = 0.0;
-        for (var r = p.row; r < p.row + p.rowSpan; r++) {
+        for (var r = p.row; r < end; r++) {
           have += heights[r];
         }
-        if (needed > have) heights[p.row + p.rowSpan - 1] += needed - have;
+        final extra = needed - have;
+        if (extra <= 0) continue;
+        for (var r = p.row; r < end; r++) {
+          heights[r] +=
+              have > 0 ? extra * heights[r] / have : extra / p.rowSpan;
+        }
       }
     }
     return heights;
   }
 
-  /// Cell padding: the cell's own left/right margins, else the table-wide
-  /// cell padding, else Word's defaults (0.08" left/right).
+  /// Cell padding: the cell's own margins, else the table-wide cell
+  /// padding (left/right only, as the reader takes it from `tblCellMar`'s
+  /// left side), else Word's defaults (0.08" left/right) and 3pt top/bottom.
   _Insets _cellPadding(DocxTableCell cell, int? tablePadding) {
     final left = (cell.marginLeft ?? tablePadding ?? 115) / 20.0;
     final right = (cell.marginRight ?? tablePadding ?? 115) / 20.0;
-    return _Insets(left, 3, right, 3);
+    final top = (cell.marginTop ?? 60) / 20.0;
+    final bottom = (cell.marginBottom ?? 60) / 20.0;
+    return _Insets(left, top, right, bottom);
   }
 
   // ===========================================================================

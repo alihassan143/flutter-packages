@@ -272,6 +272,8 @@ class TableParser {
           cnfStyle: c.cnfStyle,
           marginLeft: c.marginLeft,
           marginRight: c.marginRight,
+          marginTop: c.marginTop,
+          marginBottom: c.marginBottom,
         ));
         colIndex += c.gridSpan;
       }
@@ -319,6 +321,8 @@ class TableParser {
     String? cnfStyle;
     int? marginLeft;
     int? marginRight;
+    int? marginTop;
+    int? marginBottom;
 
     if (tcPr != null) {
       final gs = tcPr.getElement('w:gridSpan');
@@ -378,14 +382,16 @@ class TableParser {
 
       final tcMar = tcPr.getElement('w:tcMar');
       if (tcMar != null) {
-        final left = tcMar.getElement('w:left');
-        if (left != null) {
-          marginLeft = int.tryParse(left.getAttribute('w:w') ?? '');
+        int? side(String a, [String? b]) {
+          final el =
+              tcMar.getElement(a) ?? (b != null ? tcMar.getElement(b) : null);
+          return int.tryParse(el?.getAttribute('w:w') ?? '');
         }
-        final right = tcMar.getElement('w:right');
-        if (right != null) {
-          marginRight = int.tryParse(right.getAttribute('w:w') ?? '');
-        }
+
+        marginLeft = side('w:left', 'w:start');
+        marginRight = side('w:right', 'w:end');
+        marginTop = side('w:top');
+        marginBottom = side('w:bottom');
       }
     }
 
@@ -431,6 +437,8 @@ class TableParser {
       cnfStyle: cnfStyle,
       marginLeft: marginLeft,
       marginRight: marginRight,
+      marginTop: marginTop,
+      marginBottom: marginBottom,
     );
   }
 
@@ -707,6 +715,8 @@ class _TempCell {
   final String? cnfStyle;
   final int? marginLeft;
   final int? marginRight;
+  final int? marginTop;
+  final int? marginBottom;
 
   _TempCell({
     required this.children,
@@ -726,6 +736,8 @@ class _TempCell {
     this.cnfStyle,
     this.marginLeft,
     this.marginRight,
+    this.marginTop,
+    this.marginBottom,
   });
 
   _TempCell copyWith({int? finalRowSpan}) {
@@ -745,6 +757,8 @@ class _TempCell {
       verticalAlign: verticalAlign,
       marginLeft: marginLeft,
       marginRight: marginRight,
+      marginTop: marginTop,
+      marginBottom: marginBottom,
       finalRowSpan: finalRowSpan ?? this.finalRowSpan,
       cnfStyle: cnfStyle,
     );

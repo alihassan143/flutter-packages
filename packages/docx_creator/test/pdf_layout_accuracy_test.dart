@@ -451,4 +451,131 @@ void main() {
     // Level 1 sits at 1440 twips = indentPerLevel * (level + 1).
     expect(style.indentPerLevel * (nested.level + 1), 1440);
   });
+
+  group('Table measurement', () {
+    DocxTableRow row(List<DocxTableCell> cells, {bool isHeader = false}) =>
+        DocxTableRow(cells: cells, isHeader: isHeader);
+    DocxTableCell cell(String text,
+            {int rowSpan = 1, int? marginTop, int? marginBottom}) =>
+        DocxTableCell(
+            rowSpan: rowSpan,
+            marginTop: marginTop,
+            marginBottom: marginBottom,
+            children: [DocxParagraph.text(text)]);
+
+    test('a tall rowSpan cell spreads its extra height over every row', () {
+      final table = DocxTable(rows: [
+        row([cell('line ' * 60, rowSpan: 3), cell('a')]),
+        row([cell('b')]),
+        row([cell('c')]),
+      ]);
+      final heights = PdfExporter().measureTableRowHeights(table, [100, 100]);
+      final single = PdfExporter().measureTableRowHeights(
+          DocxTable(rows: [
+            row([cell('a')])
+          ]),
+          [100]).single;
+      // All three rows grow equally, like a browser, rather than only the
+      // last one absorbing the spanned cell's height.
+      expect(heights[0], greaterThan(single * 2));
+      expect(heights[1], closeTo(heights[0], 0.01));
+      expect(heights[2], closeTo(heights[0], 0.01));
+    });
+
+    test('cell top/bottom margins add to the row height and round-trip',
+        () async {
+      final exporter = PdfExporter();
+      double height(int? top, int? bottom) => exporter.measureTableRowHeights(
+          DocxTable(rows: [
+            row([cell('x', marginTop: top, marginBottom: bottom)])
+          ]),
+          [200]).single;
+      // 400 + 200 twips = 30pt of padding instead of the default 3pt + 3pt.
+      expect(height(400, 200) - height(null, null), closeTo(24, 0.01));
+
+      final doc = docx()
+          .add(DocxTable(rows: [
+            row([cell('x', marginTop: 400, marginBottom: 200)])
+          ]))
+          .build();
+      final reloaded = await DocxReader.loadFromBytes(
+          await DocxExporter().exportToBytes(doc));
+      final c = reloaded.elements
+          .whereType<DocxTable>()
+          .single
+          .rows
+          .single
+          .cells
+          .single;
+      expect(c.marginTop, 400);
+      expect(c.marginBottom, 200);
+    });
+
+    test('header rows repeat on every page a table continues on', () {
+      final rows = [
+        row([cell('HEAD')], isHeader: true),
+        for (var i = 0; i < 90; i++) row([cell('r$i')]),
+      ];
+      final pages = _pageStreams(docx().add(DocxTable(rows: rows)).build());
+      expect(pages.length, greaterThan(1));
+      for (final page in pages) {
+        final shown = _shownStrings(page);
+        expect(shown.first, 'HEAD');
+        expect(shown.where((s) => s == 'HEAD'), hasLength(1));
+      }
+    });
+
+    test('a header row is never left alone at the bottom of a page', () {
+      // Try every amount of preceding text, so that for some of them only
+      // the (tall) header row still fits at the bottom of the first page.
+      for (var n = 10; n < 30; n++) {
+        final builder = docx();
+        for (var i = 0; i < n; i++) {
+          builder.add(DocxParagraph.text('filler $i'));
+        }
+        final pages = _pageStreams(builder
+            .add(DocxTable(rows: [
+              DocxTableRow(height: 1200, isHeader: true, cells: [cell('HEAD')]),
+              row([cell('body ' * 300)]),
+            ]))
+            .build());
+        for (final page in pages) {
+          expect(_shownStrings(page).lastWhere((s) => s.trim().isNotEmpty),
+              isNot('HEAD'),
+              reason: 'header orphaned after $n paragraphs');
+        }
+      }
+    });
+
+    test('HTML padding shorthand and cellpadding reach every side', () async {
+      final nodes = await DocxParser.fromHtml(
+          '<table><tr><td style="padding:10px 20px">a</td></tr></table>'
+          '<table cellpadding="8"><tr><td>b</td></tr></table>');
+      final cells = [
+        for (final t in nodes.whereType<DocxTable>()) t.rows.single.cells.single
+      ];
+      expect([
+        cells[0].marginTop,
+        cells[0].marginRight,
+        cells[0].marginBottom,
+        cells[0].marginLeft
+      ], [
+        150,
+        300,
+        150,
+        300
+      ]);
+      expect([
+        cells[1].marginTop,
+        cells[1].marginRight,
+        cells[1].marginBottom,
+        cells[1].marginLeft
+      ], [
+        120,
+        120,
+        120,
+        120
+      ]);
+    });
+  });
 }

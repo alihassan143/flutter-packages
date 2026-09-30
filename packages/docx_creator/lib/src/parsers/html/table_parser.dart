@@ -21,6 +21,12 @@ class HtmlTableParser {
   /// Parse a table element.
   Future<DocxTable> parseTable(dom.Element element) async {
     final rows = <DocxTableRow>[];
+    // Legacy `cellpadding` (CSS pixels) pads all four sides of every cell
+    // that doesn't set its own padding.
+    final cellPaddingPx =
+        double.tryParse(element.attributes['cellpadding'] ?? '');
+    final cellPaddingAttr =
+        cellPaddingPx != null ? (cellPaddingPx * 0.75 * 20).round() : null;
 
     for (var child in element.children) {
       final childTag = child.localName?.toLowerCase();
@@ -29,13 +35,15 @@ class HtmlTableParser {
         final isHeaderSection = childTag == 'thead';
         for (var tr in child.children) {
           if (tr.localName?.toLowerCase() == 'tr') {
-            final row =
-                await _parseTableRow(tr, isHeaderSection: isHeaderSection);
+            final row = await _parseTableRow(tr,
+                isHeaderSection: isHeaderSection,
+                cellPaddingAttr: cellPaddingAttr);
             if (row != null) rows.add(row);
           }
         }
       } else if (childTag == 'tr') {
-        final row = await _parseTableRow(child);
+        final row =
+            await _parseTableRow(child, cellPaddingAttr: cellPaddingAttr);
         if (row != null) rows.add(row);
       }
     }
@@ -77,6 +85,7 @@ class HtmlTableParser {
   Future<DocxTableRow?> _parseTableRow(
     dom.Element tr, {
     bool isHeaderSection = false,
+    int? cellPaddingAttr,
   }) async {
     final rowStyle = context.mergeStyles(tr.attributes['style'], tr.classes);
     final rowShadingFill =
@@ -92,6 +101,7 @@ class HtmlTableParser {
           isHeader: isHeaderSection || tag == 'th',
           rowShadingFill: rowShadingFill,
           rowColorHex: rowColorHex,
+          cellPaddingAttr: cellPaddingAttr,
         );
         cells.add(cell);
       }
@@ -106,6 +116,7 @@ class HtmlTableParser {
     bool isHeader = false,
     String? rowShadingFill,
     String? rowColorHex,
+    int? cellPaddingAttr,
   }) async {
     final style = context.mergeStyles(td.attributes['style'], td.classes);
 
@@ -118,6 +129,7 @@ class HtmlTableParser {
     final colorHex =
         ColorUtils.parseCssColorProperty(style, 'color') ?? rowColorHex;
 
+    final padding = _paddingShorthandTwips(style);
     final colSpan = int.tryParse(td.attributes['colspan'] ?? '1') ?? 1;
     final rowSpan = int.tryParse(td.attributes['rowspan'] ?? '1') ?? 1;
 
@@ -169,10 +181,39 @@ class HtmlTableParser {
       borderRight: ColorUtils.parseCssBorderProperty(style, 'border-right') ??
           ColorUtils.parseCssBorderProperty(style, 'border'),
       marginLeft: _lengthPropertyTwips(style, 'padding-left') ??
-          _lengthPropertyTwips(style, 'margin-left'),
+          padding?[3] ??
+          _lengthPropertyTwips(style, 'margin-left') ??
+          cellPaddingAttr,
       marginRight: _lengthPropertyTwips(style, 'padding-right') ??
-          _lengthPropertyTwips(style, 'margin-right'),
+          padding?[1] ??
+          _lengthPropertyTwips(style, 'margin-right') ??
+          cellPaddingAttr,
+      marginTop: _lengthPropertyTwips(style, 'padding-top') ??
+          padding?[0] ??
+          cellPaddingAttr,
+      marginBottom: _lengthPropertyTwips(style, 'padding-bottom') ??
+          padding?[2] ??
+          cellPaddingAttr,
     );
+  }
+
+  /// The `padding` shorthand as [top, right, bottom, left] twips, or null.
+  List<int?>? _paddingShorthandTwips(String style) {
+    final match =
+        RegExp(r'(?:^|;)\s*padding\s*:\s*([^;]+)', caseSensitive: false)
+            .firstMatch(style);
+    if (match == null) return null;
+    final values = match.group(1)!.trim().split(RegExp(r'\s+')).map((v) {
+      final pt = ColorUtils.parseCssLengthToPoints(v);
+      return pt != null ? (pt * 20).round() : null;
+    }).toList();
+    return switch (values.length) {
+      1 => [values[0], values[0], values[0], values[0]],
+      2 => [values[0], values[1], values[0], values[1]],
+      3 => [values[0], values[1], values[2], values[1]],
+      4 => values,
+      _ => null,
+    };
   }
 
   /// Reads a CSS length property (e.g. `padding-left: 10px`) and converts

@@ -215,9 +215,15 @@ class PdfLayoutEngine {
             remainingHeight = contentHeight;
           }
 
+          // Header rows (`<thead>` / Word's "repeat as header row") are
+          // drawn again at the top of every page the table continues on,
+          // and are never left alone at the bottom of a page.
+          final headerRows = node.rows.sublist(0, _repeatedHeaderCount(node));
+          final keepWith = headerRows.length;
           var remainder = node;
           while (remainder.rows.isNotEmpty) {
-            final split = _splitTable(remainder, remainingHeight);
+            final split =
+                _splitTable(remainder, remainingHeight, keepWith: keepWith);
             final fitted = split.first;
             final rest = split.last;
 
@@ -226,11 +232,11 @@ class PdfLayoutEngine {
                 // Its first row (or rowSpan group) doesn't fit even on an
                 // empty page: place just that group and carry on, rather
                 // than looping forever or dumping the whole table here.
-                final forced =
-                    _splitTable(remainder, remainingHeight, force: true);
+                final forced = _splitTable(remainder, remainingHeight,
+                    force: true, keepWith: keepWith);
                 currentPage.add(forced.first);
                 remainingHeight -= measureTable(forced.first);
-                remainder = forced.last;
+                remainder = _withHeader(forced.last, headerRows);
                 if (remainder.rows.isNotEmpty) {
                   pages.add(currentPage);
                   currentPage = [];
@@ -246,7 +252,7 @@ class PdfLayoutEngine {
 
             currentPage.add(fitted);
             remainingHeight -= measureTable(fitted);
-            remainder = rest;
+            remainder = _withHeader(rest, headerRows);
 
             if (remainder.rows.isNotEmpty) {
               pages.add(currentPage);
@@ -635,11 +641,11 @@ class PdfLayoutEngine {
   }
 
   /// Splits a table into a part that fits [availableHeight] and the
-  /// remaining rows, mirroring [_splitParagraph] for tables. The remainder
-  /// never repeats [DocxTable.hasHeader] (the header row itself stays with
-  /// whichever chunk contains it).
+  /// remaining rows, mirroring [_splitParagraph] for tables. The first
+  /// [keepWith] rows (repeated header rows) never make up a part on their
+  /// own: at least one row after them must fit too.
   List<DocxTable> _splitTable(DocxTable table, double availableHeight,
-      {bool force = false}) {
+      {bool force = false, int keepWith = 0}) {
     if (table.rows.isEmpty) return [table, table.copyWith(rows: const [])];
 
     final colWidths = tableColumnWidths(table);
@@ -654,7 +660,10 @@ class PdfLayoutEngine {
     for (; i < table.rows.length; i++) {
       if (usedHeight + heights[i] > availableHeight) break;
       usedHeight += heights[i];
-      if (i + 1 >= table.rows.length || !continues[i + 1]) lastBreak = i + 1;
+      if (i + 1 > keepWith &&
+          (i + 1 >= table.rows.length || !continues[i + 1])) {
+        lastBreak = i + 1;
+      }
     }
 
     // Break at the last allowed boundary. If even the first row (or rowSpan
@@ -664,7 +673,7 @@ class PdfLayoutEngine {
     if (lastBreak > 0) {
       i = lastBreak;
     } else if (force) {
-      i = math.min(_groupEnd(continues, 0), table.rows.length);
+      i = math.min(_groupEnd(continues, keepWith), table.rows.length);
     } else {
       return [table.copyWith(rows: const []), table];
     }
@@ -676,6 +685,24 @@ class PdfLayoutEngine {
       table.copyWith(rows: remainderRows, hasHeader: false),
     ];
   }
+
+  /// Number of leading rows marked [DocxTableRow.isHeader] that repeat on
+  /// continuation pages, or 0 when a rowSpan runs out of them into the body
+  /// or they are the whole table.
+  int _repeatedHeaderCount(DocxTable table) {
+    var count = 0;
+    while (count < table.rows.length && table.rows[count].isHeader) {
+      count++;
+    }
+    if (count == 0 || count == table.rows.length) return 0;
+    if (_rowContinuesSpan(table)[count]) return 0;
+    return count;
+  }
+
+  DocxTable _withHeader(DocxTable rest, List<DocxTableRow> headerRows) =>
+      headerRows.isEmpty || rest.rows.isEmpty
+          ? rest
+          : rest.copyWith(rows: [...headerRows, ...rest.rows]);
 
   /// Row heights, exact when a [measurer] is set.
   List<double> _rowHeights(DocxTable table, List<double> colWidths) {
