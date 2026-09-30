@@ -17,6 +17,7 @@
     * `em`/`%`/keyword font sizes resolve against the parent; numeric `font-weight` (600+ is bold); `line-height` (unitless, %, length; inherited); `letter-spacing`; `text-transform`; `white-space`; `vertical-align: super/sub`; `mm`, `cm`, `pc`, `ex`, `ch` units.
 * **Defaults**: `HtmlTagStyle.codeBlockBackgroundColor` (inline `<code>`) and `codeblockColor` (`<pre>` background) now default to light grey instead of red/mid-grey. Links default to browser blue (`#0000EE`), `<th>` is bold and centered with no forced background, and `<blockquote>` is no longer italic.
 * Removed debug `print` output from the new engine.
+* README: install snippet on 2.2.0, table and CSS support sections, and the extended tag matrix.
 
 ## 2.1.1
 

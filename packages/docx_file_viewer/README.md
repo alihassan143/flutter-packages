@@ -29,7 +29,7 @@ Add `docx_file_viewer` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  docx_file_viewer: ^1.0.3
+  docx_file_viewer: ^1.0.5
 ```
 
 Then run:
@@ -63,6 +63,16 @@ DocxView(
   ),
 )
 ```
+
+### On the Web
+
+Browsers have no file system, so `file` doesn't work there:
+
+- Pass the document as `bytes`. With file_picker, use `withData: true` and pass `PlatformFile.bytes`.
+- `path` loads a Flutter asset on the web (for example `DocxView.path('assets/sample.docx')`).
+- `file` fails with a message explaining to pass `bytes` instead.
+
+Native platforms are unchanged.
 
 ## 📖 Usage Examples
 
@@ -178,6 +188,8 @@ DocxView(
 | `currentSearchHighlightColor` | `Color` | Orange | Background for current match |
 | `customFontFallbacks` | `List<String>` | `['Roboto', 'Arial', 'Helvetica']` | Font fallback chain |
 | `theme` | `DocxViewTheme?` | Light | Document rendering theme |
+| `showFootnotes` | `bool` | `true` | Show the footnotes section and allow tapping footnote references |
+| `showEndnotes` | `bool` | `true` | Show the endnotes section and allow tapping endnote references |
 
 ## 🎨 Theming
 

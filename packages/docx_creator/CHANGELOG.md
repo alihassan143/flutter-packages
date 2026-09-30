@@ -19,6 +19,9 @@
 ### Fixed — DOCX reader
 - Nested list levels read from a DOCX no longer get doubled indentation: `indentPerLevel` is now stored per level, matching how the writer and PDF exporter apply it.
 
+### Docs
+- README: install snippet on 1.4.0, a merged-cells and cell-padding example, header-row repeating, and the new HTML/CSS table and paragraph properties.
+
 ## 1.3.4
 
 ### Fixed

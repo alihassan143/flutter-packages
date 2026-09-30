@@ -65,7 +65,7 @@ Add it to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  htmltopdfwidgets: ^2.1.0
+  htmltopdfwidgets: ^2.2.0
 ```
 
 ---
@@ -157,13 +157,31 @@ final widgets = await HTMLToPdf().convert(
 
 | Category | Supported Elements |
 | :--- | :--- |
-| **Typography** | `h1-h6`, `p`, `span`, `b`, `strong`, `i`, `em`, `u`, `br`, `hr`, `code`, `pre` |
+| **Typography** | `h1-h6`, `p`, `span`, `b`, `strong`, `i`, `em`, `u`, `ins`, `s`, `del`, `sub`, `sup`, `small`, `big`, `cite`, `kbd`, `font`, `center`, `br`, `hr`, `code`, `pre` |
 | **Containers** | `div`, `section`, `article`, `header`, `footer`, `nav`, `aside`, `main` |
-| **Lists** | `ul`, `ol`, `li` |
-| **Layout** | `table`, `thead`, `tbody`, `tr`, `th`, `td`, `blockquote` |
+| **Lists** | `ul`, `ol` (`type`, `start`, `reversed`), `li` (`value`), `dl`, `dt`, `dd` |
+| **Layout** | `table`, `caption`, `thead`, `tbody`, `tr`, `th`, `td`, `blockquote` |
 | **Interactive** | `a` (links), `input[type="checkbox"]` |
 | **Media** | `img` (Base64, Network, File) |
 | **Math (MathML)** | `math` (inline, or `display="block"`), `mfrac`, `msup`, `msub`, `msubsup`, `msqrt`, `mroot`, `munder`, `mover`, `munderover`, `mfenced`, `mtable`/`mtr`/`mtd`, `mi`, `mn`, `mo`, `mtext`, `mspace`, `mrow`, `semantics` |
+
+### Tables
+
+Tables follow browser layout:
+
+- `colspan` and `rowspan`. A tall spanning cell spreads its extra height over the rows it covers, and a page never breaks inside a rowspan group.
+- Block content in cells (paragraphs, lists, images), cell and row CSS borders and backgrounds.
+- `valign`/`vertical-align`, `cellpadding` and cell `padding`, explicit column widths.
+- `<thead>` rows repeat at the top of every page the table continues on. `border="0"` or `border: none` removes the grid.
+
+### CSS
+
+- `<style>` blocks support descendant, child and sibling combinators, attribute selectors, structural pseudo-classes (`:first-child`, `:nth-child(odd)`), specificity and `!important`.
+- Colors: all 148 CSS named colors, `#rgb`/`#rgba`/`#rrggbbaa`, `rgb()`/`rgba()`, `hsl()`/`hsla()`.
+- Box model: `margin-*`, `padding-*`, per-side borders, `background`, and vertical margin collapsing as in browsers.
+- Text: the `font` shorthand, `em`/`%`/keyword font sizes, numeric `font-weight`, `line-height`, `letter-spacing`, `text-transform`, `white-space`, `vertical-align: super/sub`, and `mm`/`cm`/`pc`/`ex`/`ch` units.
+
+### MathML
 
 Sum, product and integral signs and radicals are drawn as vector shapes, so they work with any font. Other symbols outside Latin-1 (Greek letters, `≤`, `→`, ...) need a font that has them, passed via `fontFallback`; without one they fall back to readable text (`pi`, `<=`, `->`).
 

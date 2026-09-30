@@ -52,12 +52,12 @@ A **developer-first DOCX generation library** for Dart. Create, parse, read, and
 | Paragraph borders (incl. `<hr>`, blockquote rules) | ✅ | ✅ (actually drawn, not just spaced) |
 | `pageBreakBefore` | ✅ | ✅ |
 | Bullet/numbered lists, 9 levels, nested, custom bullets/formats, image bullets | ✅ | ✅ per-level bullets/number formats matching the DOCX numbering, also inside table cells; lists split across pages; image bullets render as the default bullet |
-| Tables: merged cells (colSpan/rowSpan) | ✅ | ✅ (correct grid placement, no overlap) |
+| Tables: merged cells (colSpan/rowSpan) | ✅ | ✅ (correct grid placement, no overlap; a tall rowSpan cell spreads its extra height over every row it covers, like a browser) |
 | Tables: per-cell/table borders, incl. "no border" styles | ✅ | ✅ |
 | Tables: real column widths | ✅ | ✅ |
-| Tables: cell shading, margins, vertical alignment, conditional formatting | ✅ | ✅ shading, margins and vertical alignment; cnfStyle not visually distinct in PDF |
+| Tables: cell shading, margins (all four sides), vertical alignment, conditional formatting | ✅ | ✅ shading, margins and vertical alignment; cnfStyle not visually distinct in PDF |
 | Tables: nested tables/lists inside cells | ✅ | ✅ |
-| Tables spanning multiple pages | N/A (Word reflows natively) | ✅ splits by row automatically |
+| Tables spanning multiple pages | N/A (Word reflows natively) | ✅ splits by row automatically; header rows repeat on every page and are never left alone at the bottom of one |
 | Images: inline & floating, wrapping, alignment | ✅ | ✅ (floating-specific wrap/z-order collapses to normal inline flow in PDF) |
 | Image formats | PNG/JPEG/GIF/BMP as provided | ✅ PNG/GIF/BMP/etc. decoded & re-embedded as JPEG; JPEG passthrough |
 | Image borders | ✅ | ✅ drawn for both block-level and inline images |
@@ -102,7 +102,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  docx_creator: ^1.3.2
+  docx_creator: ^1.4.0
 ```
 
 Then run:
@@ -256,7 +256,7 @@ An explicit `addFont()` call always takes priority over the fallback. CJK and Ar
 | Tables: merged cells (colSpan/rowSpan)              | ✅      |
 | Tables: real column widths & per-cell/table borders | ✅      |
 | Tables: nested lists/tables in cells               | ✅      |
-| Tables spanning multiple pages                     | ✅ auto-splits by row |
+| Tables spanning multiple pages                     | ✅ auto-splits by row, repeats header rows |
 | Long words/URLs wider than the line                | ✅ split across lines |
 | Images (PNG/JPEG/GIF/BMP), alignment               | ✅      |
 | Inline images inside paragraph text                | ✅      |
@@ -460,11 +460,36 @@ final styledTable = DocxTable(
         verticalAlign: DocxVerticalAlign.center,
       ),
       // More cells...
-    ]),
+    ], isHeader: true),  // Repeats at the top of every PDF page the table continues on
     // More rows...
   ],
 );
 ```
+
+### Merged Cells and Cell Padding
+
+```dart
+DocxTable(
+  rows: [
+    DocxTableRow(cells: [
+      DocxTableCell(
+        rowSpan: 2,          // Covers this row and the next
+        marginLeft: 144,     // Padding in twips (1/20 pt)
+        marginRight: 144,
+        marginTop: 100,      // Top padding in twips
+        marginBottom: 100,   // Bottom padding in twips
+        children: [DocxParagraph.text('Spans two rows')],
+      ),
+      DocxTableCell.text('Row 1'),
+    ]),
+    DocxTableRow(cells: [DocxTableCell.text('Row 2')]),
+  ],
+);
+```
+
+- Cell margins are written to `w:tcMar` and read back by `DocxReader`. A table-wide `DocxTableStyle.cellPadding` (`w:tblCellMar`) applies to every cell that has no margins of its own.
+- In PDF export, a `rowSpan` cell taller than its rows spreads the extra height across all of them, in proportion to their heights, as browsers do.
+- Rows with `isHeader: true` (or the first row of a table with `hasHeader: true`) repeat at the top of each continuation page. They are Word's "repeat as header row" (`w:tblHeader`).
 
 ---
 
@@ -552,8 +577,8 @@ Over 70 preset shapes including: `rect`, `ellipse`, `triangle`, `diamond`, `star
 | `<a href="">`       | Hyperlink              |
 | `<code>`            | Inline code            |
 | `<pre>`             | Code block             |
-| `<ul>`, `<ol>`    | Lists                  |
-| `<table>`           | Tables                 |
+| `<ul>`, `<ol>`    | Lists (`type`, `list-style-type` map to number formats and bullets) |
+| `<table>`           | Tables (`colspan`/`rowspan`, `<thead>` header rows, `cellpadding`, `align`/`valign`) |
 | `<img>`             | Images                 |
 | `<blockquote>`      | Blockquote             |
 | `<hr>`              | Horizontal rule        |
@@ -577,7 +602,18 @@ text-decoration: underline;   /* Underline/strikethrough */
 margin-left: 20px;            /* Paragraph/cell indentation */
 padding-left: 20px;           /* Paragraph/cell indentation */
 text-indent: 20px;            /* First-line indentation */
+margin-top: 12px;             /* Paragraph spacing before (margin-bottom: after; margin shorthand too) */
+line-height: 1.5;             /* Line spacing */
+text-transform: uppercase;    /* All caps (font-variant: small-caps for small caps) */
+list-style-type: lower-alpha; /* List number format or bullet */
+background: #EEE;             /* Shorthand for shading */
+
+/* Table cells */
+padding: 4px 8px;             /* Cell padding; 1-4 values, padding-top/-bottom/-left/-right too */
+vertical-align: middle;       /* Cell vertical alignment (or the valign attribute) */
 ```
+
+On `<table>`, the `cellpadding` attribute pads every cell on all four sides unless the cell sets its own padding.
 
 Property matching is case- and whitespace-insensitive (`FONT-WEIGHT:BOLD` works the same as `font-weight: bold`), and grouped selectors (`.foo, .bar { ... }`) apply to every class listed.
 
