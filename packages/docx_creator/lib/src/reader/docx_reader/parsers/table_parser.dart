@@ -24,6 +24,11 @@ class TableParser {
     DocxTablePosition? position;
     String? styleId;
     String? tblOverlap;
+    // Table-wide top/bottom/right cell margins from `w:tblCellMar`, applied
+    // to cells without their own (cellPadding only holds the left side).
+    int? tableMarginTop;
+    int? tableMarginBottom;
+    int? tableMarginRight;
 
     if (tblPr != null) {
       final tblBorders = tblPr.getElement('w:tblBorders');
@@ -52,11 +57,21 @@ class TableParser {
       // cellPadding uniformly to all four sides).
       final tblCellMar = tblPr.getElement('w:tblCellMar');
       if (tblCellMar != null) {
-        final left = tblCellMar.getElement('w:left');
-        final padding = int.tryParse(left?.getAttribute('w:w') ?? '');
+        int? side(String a, [String? b]) {
+          final el = tblCellMar.getElement(a) ??
+              (b != null ? tblCellMar.getElement(b) : null);
+          return int.tryParse(el?.getAttribute('w:w') ?? '');
+        }
+
+        final padding = side('w:left', 'w:start');
         if (padding != null) {
           style = style.copyWith(cellPadding: padding);
         }
+        // Word leaves the top/bottom margins at 0 unless they are set.
+        tableMarginTop = side('w:top') ?? 0;
+        tableMarginBottom = side('w:bottom') ?? 0;
+        final right = side('w:right', 'w:end');
+        if (right != padding) tableMarginRight = right;
       }
 
       final tblW = tblPr.getElement('w:tblW');
@@ -271,7 +286,9 @@ class TableParser {
               DocxVerticalAlign.top,
           cnfStyle: c.cnfStyle,
           marginLeft: c.marginLeft,
-          marginRight: c.marginRight,
+          marginRight: c.marginRight ?? tableMarginRight,
+          marginTop: c.marginTop ?? tableMarginTop,
+          marginBottom: c.marginBottom ?? tableMarginBottom,
         ));
         colIndex += c.gridSpan;
       }
@@ -319,6 +336,8 @@ class TableParser {
     String? cnfStyle;
     int? marginLeft;
     int? marginRight;
+    int? marginTop;
+    int? marginBottom;
 
     if (tcPr != null) {
       final gs = tcPr.getElement('w:gridSpan');
@@ -378,14 +397,16 @@ class TableParser {
 
       final tcMar = tcPr.getElement('w:tcMar');
       if (tcMar != null) {
-        final left = tcMar.getElement('w:left');
-        if (left != null) {
-          marginLeft = int.tryParse(left.getAttribute('w:w') ?? '');
+        int? side(String a, [String? b]) {
+          final el =
+              tcMar.getElement(a) ?? (b != null ? tcMar.getElement(b) : null);
+          return int.tryParse(el?.getAttribute('w:w') ?? '');
         }
-        final right = tcMar.getElement('w:right');
-        if (right != null) {
-          marginRight = int.tryParse(right.getAttribute('w:w') ?? '');
-        }
+
+        marginLeft = side('w:left', 'w:start');
+        marginRight = side('w:right', 'w:end');
+        marginTop = side('w:top');
+        marginBottom = side('w:bottom');
       }
     }
 
@@ -431,6 +452,8 @@ class TableParser {
       cnfStyle: cnfStyle,
       marginLeft: marginLeft,
       marginRight: marginRight,
+      marginTop: marginTop,
+      marginBottom: marginBottom,
     );
   }
 
@@ -707,6 +730,8 @@ class _TempCell {
   final String? cnfStyle;
   final int? marginLeft;
   final int? marginRight;
+  final int? marginTop;
+  final int? marginBottom;
 
   _TempCell({
     required this.children,
@@ -726,6 +751,8 @@ class _TempCell {
     this.cnfStyle,
     this.marginLeft,
     this.marginRight,
+    this.marginTop,
+    this.marginBottom,
   });
 
   _TempCell copyWith({int? finalRowSpan}) {
@@ -745,6 +772,8 @@ class _TempCell {
       verticalAlign: verticalAlign,
       marginLeft: marginLeft,
       marginRight: marginRight,
+      marginTop: marginTop,
+      marginBottom: marginBottom,
       finalRowSpan: finalRowSpan ?? this.finalRowSpan,
       cnfStyle: cnfStyle,
     );

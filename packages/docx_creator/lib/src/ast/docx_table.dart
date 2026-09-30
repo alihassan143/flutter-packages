@@ -761,9 +761,12 @@ class DocxTableCell extends DocxNode {
   final DocxBorderSide? borderLeft;
   final DocxBorderSide? borderRight;
 
-  // Margins
+  // Margins (cell padding) in twips; null falls back to the table's
+  // `DocxTableStyle.cellPadding`.
   final int? marginLeft;
   final int? marginRight;
+  final int? marginTop;
+  final int? marginBottom;
 
   const DocxTableCell({
     this.children = const [],
@@ -781,6 +784,8 @@ class DocxTableCell extends DocxNode {
     this.borderRight,
     this.marginLeft,
     this.marginRight,
+    this.marginTop,
+    this.marginBottom,
     this.cnfStyle,
     super.id,
   });
@@ -831,6 +836,8 @@ class DocxTableCell extends DocxNode {
     DocxBorderSide? borderRight,
     int? marginLeft,
     int? marginRight,
+    int? marginTop,
+    int? marginBottom,
     String? cnfStyle,
   }) {
     return DocxTableCell(
@@ -849,6 +856,8 @@ class DocxTableCell extends DocxNode {
       borderRight: borderRight ?? this.borderRight,
       marginLeft: marginLeft ?? this.marginLeft,
       marginRight: marginRight ?? this.marginRight,
+      marginTop: marginTop ?? this.marginTop,
+      marginBottom: marginBottom ?? this.marginBottom,
       cnfStyle: cnfStyle ?? this.cnfStyle,
       id: id,
     );
@@ -951,17 +960,21 @@ class DocxTableCell extends DocxNode {
               themeFillTint: themeFillTint,
               themeFillShade: themeFillShade,
             );
-            if (marginLeft != null || marginRight != null) {
+            if (marginTop != null ||
+                marginLeft != null ||
+                marginBottom != null ||
+                marginRight != null) {
+              // CT_TcMar child order: top, left (start), bottom, right (end).
               builder.element('w:tcMar', nest: () {
-                if (marginLeft != null) {
-                  builder.element('w:left', nest: () {
-                    builder.attribute('w:w', marginLeft.toString());
-                    builder.attribute('w:type', 'dxa');
-                  });
-                }
-                if (marginRight != null) {
-                  builder.element('w:right', nest: () {
-                    builder.attribute('w:w', marginRight.toString());
+                for (final (tag, value) in [
+                  ('w:top', marginTop),
+                  ('w:left', marginLeft),
+                  ('w:bottom', marginBottom),
+                  ('w:right', marginRight),
+                ]) {
+                  if (value == null) continue;
+                  builder.element(tag, nest: () {
+                    builder.attribute('w:w', value.toString());
                     builder.attribute('w:type', 'dxa');
                   });
                 }
