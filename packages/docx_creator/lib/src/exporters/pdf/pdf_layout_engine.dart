@@ -686,12 +686,15 @@ class PdfLayoutEngine {
     ];
   }
 
-  /// Number of leading rows marked [DocxTableRow.isHeader] that repeat on
-  /// continuation pages, or 0 when a rowSpan runs out of them into the body
-  /// or they are the whole table.
+  /// Number of leading header rows that repeat on continuation pages, or 0
+  /// when a rowSpan runs out of them into the body or they are the whole
+  /// table. Like the DOCX writer (which marks them `w:tblHeader`), a row is
+  /// a header if it says so or it is the first row of a [DocxTable.hasHeader]
+  /// table.
   int _repeatedHeaderCount(DocxTable table) {
     var count = 0;
-    while (count < table.rows.length && table.rows[count].isHeader) {
+    while (count < table.rows.length &&
+        (table.rows[count].isHeader || (count == 0 && table.hasHeader))) {
       count++;
     }
     if (count == 0 || count == table.rows.length) return 0;

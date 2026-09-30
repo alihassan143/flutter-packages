@@ -62,6 +62,9 @@ class HtmlTableParser {
 
     return DocxTable(
       rows: rows,
+      // Only `<thead>` rows repeat on each page (and are written as Word
+      // header rows), as in a browser's print layout.
+      hasHeader: rows.isNotEmpty && rows.first.isHeader,
       style: DocxTableStyle(
         borderTop: ColorUtils.parseCssBorderProperty(styleStr, 'border-top') ??
             ColorUtils.parseCssBorderProperty(styleStr, 'border') ??
@@ -203,7 +206,11 @@ class HtmlTableParser {
         RegExp(r'(?:^|;)\s*padding\s*:\s*([^;]+)', caseSensitive: false)
             .firstMatch(style);
     if (match == null) return null;
-    final values = match.group(1)!.trim().split(RegExp(r'\s+')).map((v) {
+    final value = match
+        .group(1)!
+        .replaceAll(RegExp(r'!\s*important', caseSensitive: false), '')
+        .trim();
+    final values = value.split(RegExp(r'\s+')).map((v) {
       final pt = ColorUtils.parseCssLengthToPoints(v);
       return pt != null ? (pt * 20).round() : null;
     }).toList();

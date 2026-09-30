@@ -1742,13 +1742,13 @@ class PdfExporter implements PdfBlockMeasurer {
   }
 
   /// Cell padding: the cell's own margins, else the table-wide cell
-  /// padding (left/right only, as the reader takes it from `tblCellMar`'s
-  /// left side), else Word's defaults (0.08" left/right) and 3pt top/bottom.
+  /// padding (which the DOCX writer applies to all four sides), else Word's
+  /// defaults (0.08" left/right) and 3pt top/bottom.
   _Insets _cellPadding(DocxTableCell cell, int? tablePadding) {
     final left = (cell.marginLeft ?? tablePadding ?? 115) / 20.0;
     final right = (cell.marginRight ?? tablePadding ?? 115) / 20.0;
-    final top = (cell.marginTop ?? 60) / 20.0;
-    final bottom = (cell.marginBottom ?? 60) / 20.0;
+    final top = (cell.marginTop ?? tablePadding ?? 60) / 20.0;
+    final bottom = (cell.marginBottom ?? tablePadding ?? 60) / 20.0;
     return _Insets(left, top, right, bottom);
   }
 

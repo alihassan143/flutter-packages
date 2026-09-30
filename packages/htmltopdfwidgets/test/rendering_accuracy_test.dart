@@ -2,6 +2,7 @@ import 'package:htmltopdfwidgets/htmltopdfwidgets.dart';
 import 'package:htmltopdfwidgets/src/browser/css_style.dart';
 import 'package:htmltopdfwidgets/src/browser/html_parser.dart';
 import 'package:htmltopdfwidgets/src/browser/render_node.dart';
+import 'package:htmltopdfwidgets/src/browser/span_grid.dart';
 import 'package:test/test.dart';
 
 /// Every [RichText] reachable from [widgets], in document order.
@@ -247,16 +248,62 @@ void main() {
           <tr><td>a</td><td>b</td></tr>
         </table>''');
       expect(_richTexts(widgets).map(_plain).toList(), ['Head', 'a', 'b']);
-      final tables = <Table>[];
-      void walk(Widget? w) {
-        if (w is Table) tables.add(w);
-        if (w is SingleChildWidget) walk(w.child);
-        if (w is Container) walk(w.child);
+      final grids = widgets.whereType<SpanGrid>().toList();
+      expect(grids.first.cells.single.colSpan, 2);
+      expect(grids.last.cells.map((c) => c.col), [0, 1]);
+    });
+
+    test('rowspan cells merge rows and share their height', () async {
+      final widgets = await HTMLToPdf().convert('''
+        <table border="1">
+          <tr><td rowspan="3">${'tall ' * 80}</td><td>a</td></tr>
+          <tr><td>b</td></tr>
+          <tr><td>c</td></tr>
+          <tr><td>d</td><td>e</td></tr>
+        </table>''');
+      final grids = widgets.whereType<SpanGrid>().toList();
+      // The three joined rows form one unbreakable group; row 4 is its own.
+      expect(grids.map((g) => g.rowCount), [3, 1]);
+      final doc = Document()..addPage(MultiPage(build: (_) => widgets));
+      await doc.save();
+      final group = grids.first;
+      final spanning = group.cells.firstWhere((c) => c.rowSpan == 3);
+      final singles = group.cells.where((c) => c.rowSpan == 1).toList();
+      expect(spanning.height, closeTo(group.box!.height, 0.01));
+      // Like a browser, the extra height is spread over all three rows.
+      for (final c in singles) {
+        expect(c.height, closeTo(group.box!.height / 3, 0.01));
+      }
+    });
+
+    test('vertical-align places cell content at the right edge', () async {
+      Future<Alignment?> alignOf(String valign) async {
+        final widgets = await HTMLToPdf().convert(
+            '<table><tr><td style="vertical-align:$valign">x</td></tr></table>');
+        Alignment? found;
+        void walk(Widget? w) {
+          if (found != null || w == null) return;
+          if (w is Container && w.alignment != null) {
+            found = w.alignment as Alignment;
+          } else if (w is Table) {
+            for (final row in w.children) {
+              row.children.forEach(walk);
+            }
+          } else if (w is MultiChildWidget) {
+            w.children.forEach(walk);
+          } else if (w is SingleChildWidget) {
+            walk(w.child);
+          }
+        }
+
+        widgets.forEach(walk);
+        return found;
       }
 
-      widgets.forEach(walk);
-      expect(tables.first.children.single.children, hasLength(1));
-      expect(tables.last.children.single.children, hasLength(2));
+      // pdf's Alignment y axis points up.
+      expect((await alignOf('top'))!.y, 1);
+      expect((await alignOf('middle'))!.y, 0);
+      expect((await alignOf('bottom'))!.y, -1);
     });
 
     test('block content in cells is rendered, not flattened', () async {
@@ -343,10 +390,9 @@ void main() {
       final widgets = await HTMLToPdf().convert(
           '<table><tr><th colspan="2">Head</th></tr>'
           '<tr><td width="80">A</td><td>${'long text ' * 20}</td></tr></table>');
-      final rowTable = widgets.whereType<Table>().last;
-      final widths = rowTable.columnWidths!;
-      final a = (widths[0] as FlexColumnWidth).flex;
-      final b = (widths[1] as FlexColumnWidth).flex;
+      final flex = widgets.whereType<SpanGrid>().last.columnFlex;
+      final a = flex[0];
+      final b = flex[1];
       // 80px = 60pt of ~480pt: the text column must get most of the width.
       expect(b, greaterThan(a * 3));
     });

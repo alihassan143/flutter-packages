@@ -9,6 +9,7 @@ import 'image_builder_io.dart' if (dart.library.html) 'image_builder_web.dart'
     as image_builder;
 import 'layout/layout_node.dart';
 import 'mathml_builder.dart';
+import 'span_grid.dart';
 
 /// A laid-out block: its widgets plus the vertical margins it wants around
 /// it. Margins are kept separate so adjacent sibling margins can collapse
@@ -1221,7 +1222,8 @@ class PdfBuilder {
         final rowSpan =
             (int.tryParse(cell.attributes['rowspan'] ?? '') ?? 1).clamp(1, 500);
         if (colSpan > 1 || rowSpan > 1) hasSpans = true;
-        final placed = _GridCell(cell, col, colSpan);
+        final placed = _GridCell(
+            cell, col, colSpan, math.min(rowSpan, rowNodes.length - r));
         while (rowCells.length < col) {
           rowCells.add(null);
         }
@@ -1303,6 +1305,8 @@ class PdfBuilder {
           : flow.widgets.length == 1
               ? flow.widgets.first
               : pw.Column(
+                  // Shrink-wrap, so the cell's vertical-align can place it.
+                  mainAxisSize: pw.MainAxisSize.min,
                   crossAxisAlignment: pw.CrossAxisAlignment.start,
                   children: flow.widgets);
 
@@ -1311,9 +1315,10 @@ class PdfBuilder {
           : c.style.textAlign == pw.TextAlign.right
               ? 1.0
               : -1.0;
+      // pdf's Alignment y axis points up: 1 is the top edge.
       final vAlign = switch (c.style.verticalAlign ?? row.style.verticalAlign) {
-        VerticalAlign.top || VerticalAlign.baseline => -1.0,
-        VerticalAlign.bottom => 1.0,
+        VerticalAlign.top || VerticalAlign.baseline => 1.0,
+        VerticalAlign.bottom => -1.0,
         _ => 0.0,
       };
       return pw.Container(
@@ -1414,38 +1419,41 @@ class PdfBuilder {
         children: rows,
       ));
     } else {
-      // pw.Table has no cell spans: render each row as its own one-row
-      // table whose columns are the spanned groups. All row tables share
-      // the same total flex, so column edges still line up.
-      for (var r = 0; r < grid.length; r++) {
-        final cells = <pw.Widget>[];
-        final widths = <int, pw.TableColumnWidth>{};
-        var c = 0;
-        while (c < columnCount) {
-          final cell =
-              grid[r].firstWhere((g) => g?.col == c, orElse: () => null);
-          if (cell != null) {
-            var flex = 0.0;
-            for (var k = c; k < c + cell.colSpan && k < columnCount; k++) {
-              flex += colFlex(k);
-            }
-            widths[cells.length] = pw.FlexColumnWidth(flex);
-            cells.add(await buildCell(cell, rowNodes[r]));
-            c += cell.colSpan;
-          } else {
-            widths[cells.length] = pw.FlexColumnWidth(colFlex(c));
-            cells.add(pw.SizedBox());
-            c++;
+      // pw.Table has no cell spans: lay out each group of rows joined by
+      // rowspans as one grid. Groups are separate widgets, so a page can
+      // break between them but never through a rowspan.
+      final columnFlex = [for (var c = 0; c < columnCount; c++) colFlex(c)];
+      var start = 0;
+      while (start < grid.length) {
+        var end = start + 1;
+        for (var r = start; r < end; r++) {
+          for (final cell in grid[r]) {
+            if (cell != null) end = math.max(end, r + cell.rowSpan);
           }
         }
-        widgets.add(pw.Table(
-          border: tableBorder,
-          defaultVerticalAlignment: pw.TableCellVerticalAlignment.full,
-          columnWidths: widths,
-          children: [
-            pw.TableRow(decoration: rowDecoration(rowNodes[r]), children: cells)
+        final cells = <SpanGridCell>[];
+        for (var r = start; r < end; r++) {
+          for (final cell in grid[r]) {
+            if (cell == null) continue;
+            cells.add(SpanGridCell(
+              await buildCell(cell, rowNodes[r]),
+              r - start,
+              cell.col,
+              math.min(cell.colSpan, columnCount - cell.col),
+              cell.rowSpan,
+            ));
+          }
+        }
+        widgets.add(SpanGrid(
+          columnFlex: columnFlex,
+          rowCount: end - start,
+          cells: cells,
+          rowColors: [
+            for (var r = start; r < end; r++) rowNodes[r].style.backgroundColor
           ],
+          border: tableBorder == null ? null : borderSide,
         ));
+        start = end;
       }
     }
 
@@ -1488,6 +1496,7 @@ class _GridCell {
   final LayoutNode node;
   final int col;
   final int colSpan;
+  final int rowSpan;
 
-  _GridCell(this.node, this.col, this.colSpan);
+  _GridCell(this.node, this.col, this.colSpan, this.rowSpan);
 }
