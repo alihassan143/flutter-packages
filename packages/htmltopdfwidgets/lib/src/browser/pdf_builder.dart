@@ -8,6 +8,7 @@ import 'css_style.dart';
 import 'image_builder_io.dart' if (dart.library.html) 'image_builder_web.dart'
     as image_builder;
 import 'layout/layout_node.dart';
+import 'mathml_builder.dart';
 
 /// A laid-out block: its widgets plus the vertical margins it wants around
 /// it. Margins are kept separate so adjacent sibling margins can collapse
@@ -92,6 +93,7 @@ class PdfBuilder {
   // ---------------------------------------------------------------------------
 
   bool _isInlineLevel(LayoutNode node) {
+    if (node.tagName == 'math') return !_isBlockMath(node);
     if (node.tagName == '#text' || node.tagName == 'br') return true;
     if (node.tagName == 'input') {
       return node.attributes['type'] == 'checkbox';
@@ -150,6 +152,12 @@ class PdfBuilder {
     final marginBottom = style.margin?.bottom ?? 0;
 
     switch (node.tagName) {
+      case 'math':
+        final box = _buildMath(node);
+        return _Block(
+            [pw.Align(alignment: pw.Alignment.center, child: box.widget)],
+            marginTop: math.max(marginTop, (style.fontSize ?? 12) * 0.5),
+            marginBottom: math.max(marginBottom, (style.fontSize ?? 12) * 0.5));
       case 'img':
         return _Block([
           _horizontalMargins(_alignBlock(await _buildImage(node), style), style)
@@ -539,6 +547,20 @@ class PdfBuilder {
       return;
     }
 
+    if (node.tagName == 'math') {
+      final block = _isBlockMath(node);
+      final box = _buildMath(node);
+      // Display math nested in inline content still gets a line of its own.
+      if (block && ctx.spans.isNotEmpty) {
+        ctx.spans.add(const pw.TextSpan(text: '\n'));
+      }
+      // Put the formula's baseline on the text baseline.
+      ctx.spans.add(pw.WidgetSpan(child: box.widget, baseline: -box.depth));
+      if (block) ctx.spans.add(const pw.TextSpan(text: '\n'));
+      ctx.lastWasSpace = block;
+      return;
+    }
+
     if (node.tagName == 'img') {
       ctx.spans.add(pw.WidgetSpan(child: await _buildImage(node)));
       ctx.lastWasSpace = false;
@@ -751,6 +773,16 @@ class PdfBuilder {
           : null,
     );
   }
+
+  /// Renders a MathML `<math>` element (see [MathMLBuilder]).
+  MathBox _buildMath(LayoutNode node) => MathMLBuilder(
+        textStyle: _mapTextStyle(node.style),
+        fontFallback: fontFallback,
+      ).build(node, display: _isBlockMath(node));
+
+  /// `<math display="block">` (case-insensitive) or CSS `display: block`.
+  bool _isBlockMath(LayoutNode node) =>
+      MathMLBuilder.isDisplayBlock(node) || node.style.display == Display.block;
 
   // ---------------------------------------------------------------------------
   // Specific blocks

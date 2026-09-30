@@ -163,6 +163,9 @@ final widgets = await HTMLToPdf().convert(
 | **Layout** | `table`, `thead`, `tbody`, `tr`, `th`, `td`, `blockquote` |
 | **Interactive** | `a` (links), `input[type="checkbox"]` |
 | **Media** | `img` (Base64, Network, File) |
+| **Math (MathML)** | `math` (inline, or `display="block"`), `mfrac`, `msup`, `msub`, `msubsup`, `msqrt`, `mroot`, `munder`, `mover`, `munderover`, `mfenced`, `mtable`/`mtr`/`mtd`, `mi`, `mn`, `mo`, `mtext`, `mspace`, `mrow`, `semantics` |
+
+Sum, product and integral signs and radicals are drawn as vector shapes, so they work with any font. Other symbols outside Latin-1 (Greek letters, `≤`, `→`, ...) need a font that has them, passed via `fontFallback`; without one they fall back to readable text (`pi`, `<=`, `->`).
 
 ---
 
