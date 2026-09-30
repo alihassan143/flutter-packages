@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'dart:io' show File;
 import 'dart:typed_data';
 
 import 'package:docx_creator/docx_creator.dart';
@@ -8,6 +8,7 @@ import 'docx_view_config.dart';
 import 'font_loader/embedded_font_loader.dart';
 import 'search/docx_search_controller.dart';
 import 'theme/docx_view_theme.dart';
+import 'utils/docx_source_loader.dart';
 import 'widget_generator/docx_widget_generator.dart';
 
 /// A Flutter widget for viewing DOCX files.
@@ -153,16 +154,11 @@ class _DocxViewState extends State<DocxView> {
     });
 
     try {
-      Uint8List bytes;
-      if (widget.bytes != null) {
-        bytes = widget.bytes!;
-      } else if (widget.file != null) {
-        bytes = await widget.file!.readAsBytes();
-      } else if (widget.path != null) {
-        bytes = await File(widget.path!).readAsBytes();
-      } else {
-        throw ArgumentError('No document source provided');
-      }
+      final bytes = await DocxSourceLoader.load(
+        bytes: widget.bytes,
+        file: widget.file,
+        path: widget.path,
+      );
 
       // Load document using docx_creator
       final doc = await DocxReader.loadFromBytes(bytes);
@@ -209,7 +205,11 @@ class _DocxViewState extends State<DocxView> {
       });
 
       widget.onLoaded?.call();
-    } catch (e) {
+    } catch (e, stack) {
+      // Surface the full error and stack trace in the console (issue #71):
+      // the on-screen message alone rarely says where loading failed.
+      debugPrint('DocxView: failed to load document: $e\n$stack');
+      if (!mounted) return;
       setState(() {
         _error = e;
         _isLoading = false;

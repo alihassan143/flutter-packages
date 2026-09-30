@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:docx_file_viewer/docx_file_viewer.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -70,7 +71,22 @@ class _HomeScreenState extends State<HomeScreen> {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['docx'],
+      // Browsers expose no file paths (and dart:io File can't be read
+      // there), so on the web read the picked file's bytes directly.
+      withData: kIsWeb,
     );
+
+    if (kIsWeb) {
+      final bytes = result?.files.single.bytes;
+      if (bytes != null) {
+        setState(() {
+          _selectedFile = null;
+          _demoBytes = bytes;
+          _errorMessage = null;
+        });
+      }
+      return;
+    }
 
     if (result != null && result.files.single.path != null) {
       setState(() {
