@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
 - Load failures are now also logged to the console with their stack trace, not only shown on screen.
 - The example app now opens picked files on the web (it read `PlatformFile.path`, which file_picker doesn't provide in browsers).
 
+### Docs
+- README: install snippet on 1.0.5, how to load documents on the web, and the `showFootnotes`/`showEndnotes` options.
+
 ## [1.0.4] - 2026-09-13
 
 ### Added
