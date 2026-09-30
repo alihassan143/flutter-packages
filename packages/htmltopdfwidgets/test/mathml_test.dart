@@ -125,6 +125,18 @@ void main() {
       expect(flatten(widgets).whereType<CustomPaint>(), isNotEmpty);
     });
 
+    test('large operators outside <mo> fall back to Latin-1 text', () async {
+      final widgets = await HTMLToPdf()
+          .convert('<p><math><mi>&sum;</mi><mtext>&prod;</mtext><mi>&int;</mi>'
+              '</math></p>');
+      final shown = textsOf(widgets).map(str).toList();
+      expect(shown, containsAll(['Sigma', 'Pi', 'int']));
+      for (final s in shown) {
+        expect(s.runes.every((r) => r <= 0xFF), isTrue,
+            reason: '"$s" has a glyph the standard fonts lack');
+      }
+    });
+
     test('a binary operator after a closing fence keeps its spacing', () async {
       final widgets = await HTMLToPdf().convert(
           '<p><math><mo>(</mo><mi>a</mi><mo>)</mo><mo>+</mo><mi>b</mi></math></p>');

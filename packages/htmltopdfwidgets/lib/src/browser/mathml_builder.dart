@@ -265,7 +265,9 @@ class MathMLBuilder {
     '∗': '*',
     '∈': 'in',
     '…': '...',
-    '∑': 'Σ', // handled by drawing, see _largeOperator
+    // <mo> large operators are drawn (see _largeOperator); these cover the
+    // same glyphs in other token elements and bare text.
+    '∑': 'Sigma', '∏': 'Pi', '∫': 'int',
     'α': 'alpha', 'β': 'beta', 'γ': 'gamma',
     'δ': 'delta', 'ε': 'epsilon', 'θ': 'theta',
     'λ': 'lambda', 'μ': 'mu', 'π': 'pi',
