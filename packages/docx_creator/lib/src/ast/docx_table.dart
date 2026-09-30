@@ -261,20 +261,54 @@ class DocxTable extends DocxBlock {
 
     if (rows.isEmpty) return [];
 
-    final firstRowCells = rows.first.cells;
-    final int columnCount = firstRowCells.length;
-    if (columnCount == 0) return [];
-
-    // Check if we have explicit cell widths
-    final hasCellWidths = firstRowCells.every((c) => c.width != null);
-    if (hasCellWidths) {
-      return firstRowCells.map((c) => c.width!).toList();
+    // Column count must account for colSpan and for columns still covered
+    // by a rowSpan cell from an earlier row (rows omit those cells), not
+    // just the first row's cell count - otherwise a first row such as
+    // `<th colspan="2">` + `<th>` yields 2 columns for a 3-column table.
+    var columnCount = 0;
+    final explicitWidths = <int, int>{};
+    final activeSpans = <int, int>{};
+    for (final row in rows) {
+      var col = 0;
+      for (final cell in row.cells) {
+        while ((activeSpans[col] ?? 0) > 0) {
+          col++;
+        }
+        if (cell.colSpan == 1 && cell.width != null) {
+          explicitWidths.putIfAbsent(col, () => cell.width!);
+        }
+        if (cell.rowSpan > 1) {
+          for (var c = col; c < col + cell.colSpan; c++) {
+            activeSpans[c] = cell.rowSpan;
+          }
+        }
+        col += cell.colSpan;
+      }
+      var end = col;
+      activeSpans.forEach((c, remaining) {
+        if (remaining > 0 && c + 1 > end) end = c + 1;
+      });
+      if (end > columnCount) columnCount = end;
+      for (final key in activeSpans.keys.toList()) {
+        activeSpans[key] = activeSpans[key]! - 1;
+      }
     }
+    if (columnCount == 0) return [];
 
     // Distribute total available width
     // Standard A4 (11906) - Margins (1440*2) = 9026. Rounding to 9022 as suggested.
     const int totalWidth = 9022;
-    // For now, simple equal distribution if widths are missing
+    if (explicitWidths.length == columnCount) {
+      return List<int>.generate(columnCount, (i) => explicitWidths[i]!);
+    }
+    if (explicitWidths.isNotEmpty) {
+      // Share what the explicit columns leave over among the others.
+      final used = explicitWidths.values.fold<int>(0, (a, b) => a + b);
+      final missing = columnCount - explicitWidths.length;
+      final rest = ((totalWidth - used) / missing).floor();
+      final fill = rest > 360 ? rest : 360;
+      return List<int>.generate(columnCount, (i) => explicitWidths[i] ?? fill);
+    }
     final colWidth = (totalWidth / columnCount).floor();
     return List<int>.filled(columnCount, colWidth);
   }

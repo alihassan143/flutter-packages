@@ -373,12 +373,37 @@ class PdfFontManager {
       }
     }
 
-    if (isMono) return fontMono;
+    if (isMono || (fontFamily != null && isMonospaceFamily(fontFamily))) {
+      return fontMono;
+    }
     if (isBold && isItalic) return fontBoldItalic;
     if (isBold) return fontBold;
     if (isItalic) return fontItalic;
     return fontRegular;
   }
+
+  static const _monospaceFamilies = {
+    'courier',
+    'courier new',
+    'monospace',
+    'consolas',
+    'menlo',
+    'monaco',
+    'lucida console',
+    'source code pro',
+    'ui-monospace',
+    'sfmono-regular',
+  };
+
+  /// True for font families that should render with the standard
+  /// monospace font (Courier) when no matching font was embedded.
+  static bool isMonospaceFamily(String family) =>
+      _monospaceFamilies.contains(family
+          .split(',')
+          .first
+          .trim()
+          .replaceAll(RegExp('[\'"]'), '')
+          .toLowerCase());
 
   /// Measures the width of text in points using per-character widths.
   /// [isBold] uses Helvetica-Bold width table for accurate measurement.
@@ -392,6 +417,9 @@ class PdfFontManager {
         return embedded.measureText(text, fontSize);
       }
     }
+
+    // Courier: every glyph is 600/1000 em wide.
+    if (fontRef == fontMono) return text.runes.length * 0.6 * fontSize;
 
     // Select appropriate width table
     final widths = isBold ? _charWidthsBold : _charWidths;
@@ -604,7 +632,8 @@ class PdfFontManager {
       if (isRegular) {
         buffer.writeCharCode(byte);
       } else {
-        buffer.write('#${byte.toRadixString(16).padLeft(2, '0').toUpperCase()}');
+        buffer
+            .write('#${byte.toRadixString(16).padLeft(2, '0').toUpperCase()}');
       }
     }
     return buffer.toString();

@@ -27,6 +27,14 @@ class HtmlStyleContext {
   /// Depth of current list nesting.
   final int listLevel;
 
+  /// Inherited CSS `text-align` (null = not set by any ancestor).
+  final DocxAlign? textAlign;
+
+  /// CSS `text-transform` that must rewrite the text itself (`lowercase`,
+  /// `capitalize`); DOCX has no run property for these, unlike uppercase
+  /// ([isAllCaps]).
+  final String? textTransform;
+
   const HtmlStyleContext({
     this.colorHex,
     this.fontSize,
@@ -47,6 +55,8 @@ class HtmlStyleContext {
     this.isEmboss = false,
     this.isImprint = false,
     this.listLevel = -1,
+    this.textAlign,
+    this.textTransform,
   });
 
   HtmlStyleContext copyWith({
@@ -69,6 +79,8 @@ class HtmlStyleContext {
     bool? isEmboss,
     bool? isImprint,
     int? listLevel,
+    DocxAlign? textAlign,
+    String? textTransform,
   }) {
     return HtmlStyleContext(
       colorHex: colorHex ?? this.colorHex,
@@ -90,6 +102,8 @@ class HtmlStyleContext {
       isEmboss: isEmboss ?? this.isEmboss,
       isImprint: isImprint ?? this.isImprint,
       listLevel: listLevel ?? this.listLevel,
+      textAlign: textAlign ?? this.textAlign,
+      textTransform: textTransform ?? this.textTransform,
     );
   }
 
@@ -161,7 +175,8 @@ class HtmlStyleContext {
         final value = fontWeightMatch.group(1)!.toLowerCase();
         final numericWeight = int.tryParse(value);
         // Word (and browsers) render 600+ as visually bold.
-        final isBold = value == 'bold' || (numericWeight != null && numericWeight >= 600);
+        final isBold =
+            value == 'bold' || (numericWeight != null && numericWeight >= 600);
         if (isBold) ctx = ctx.copyWith(fontWeight: DocxFontWeight.bold);
       }
 
@@ -190,10 +205,10 @@ class HtmlStyleContext {
         }
       }
 
-      final sizeMatch =
-          RegExp(r'font-size\s*:\s*([\d.]+\s*(?:px|pt|em|rem|%)?)',
-                  caseSensitive: false)
-              .firstMatch(style);
+      final sizeMatch = RegExp(
+              r'font-size\s*:\s*([\d.]+\s*(?:px|pt|em|rem|%)?)',
+              caseSensitive: false)
+          .firstMatch(style);
       if (sizeMatch != null) {
         final fs = ColorUtils.parseCssLengthToPoints(sizeMatch.group(1)!);
         if (fs != null) ctx = ctx.copyWith(fontSize: fs);
@@ -210,6 +225,36 @@ class HtmlStyleContext {
           final hex = colorParser(val);
           if (hex != null) ctx = ctx.copyWith(colorHex: hex);
         }
+      }
+
+      final transform =
+          RegExp(r'text-transform\s*:\s*([a-z-]+)', caseSensitive: false)
+              .firstMatch(style)
+              ?.group(1)
+              ?.toLowerCase();
+      if (transform == 'uppercase') {
+        ctx = ctx.copyWith(isAllCaps: true, textTransform: 'none');
+      } else if (transform == 'lowercase' || transform == 'capitalize') {
+        ctx = ctx.copyWith(isAllCaps: false, textTransform: transform);
+      } else if (transform == 'none') {
+        ctx = ctx.copyWith(isAllCaps: false, textTransform: 'none');
+      }
+
+      final align = RegExp(r'text-align\s*:\s*([a-z]+)', caseSensitive: false)
+          .firstMatch(style)
+          ?.group(1)
+          ?.toLowerCase();
+      final parsedAlign = switch (align) {
+        'left' || 'start' => DocxAlign.left,
+        'center' => DocxAlign.center,
+        'right' || 'end' => DocxAlign.right,
+        'justify' => DocxAlign.justify,
+        _ => null,
+      };
+      if (parsedAlign != null) ctx = ctx.copyWith(textAlign: parsedAlign);
+      if (RegExp(r'font-variant\s*:\s*small-caps', caseSensitive: false)
+          .hasMatch(style)) {
+        ctx = ctx.copyWith(isSmallCaps: true);
       }
 
       // Background Color (Shading)
@@ -253,6 +298,8 @@ class HtmlStyleContext {
       isEmboss: isEmboss,
       isImprint: isImprint,
       listLevel: listLevel,
+      textAlign: textAlign,
+      textTransform: textTransform,
     );
   }
 }
@@ -276,7 +323,19 @@ class HtmlBlockStyles {
   /// First-line indentation in twips, from CSS `text-indent`.
   final int? indentFirstLine;
 
+  /// Space before/after in twips, from CSS `margin-top`/`margin-bottom`.
+  final int? spacingBefore;
+  final int? spacingAfter;
+
+  /// Line spacing (`w:spacing w:line`/`w:lineRule`) from CSS `line-height`.
+  final int? lineSpacing;
+  final String? lineRule;
+
   HtmlBlockStyles({
+    this.spacingBefore,
+    this.spacingAfter,
+    this.lineSpacing,
+    this.lineRule,
     this.shadingFill,
     this.colorHex,
     this.align = DocxAlign.left,

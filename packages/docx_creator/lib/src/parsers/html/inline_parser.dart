@@ -53,9 +53,15 @@ class HtmlInlineParser {
           return [DocxLineBreak()];
         case 'a':
           final href = node.attributes['href'];
+          // Links are blue unless the author styled their colour (browsers
+          // and Word both override the inherited text colour for links).
+          final linkColor =
+              ColorUtils.parseCssColorProperty(combinedStyle, 'color') ??
+                  (href != null ? '0563C1' : null);
           // Sync version can't handle nested async stuff well, but we do our best
           return parseInlinesSync(node.nodes,
-              context: newCtx.copyWith(href: href ?? '#', isLink: true));
+              context: newCtx.copyWith(
+                  href: href ?? '#', isLink: true, colorHex: linkColor));
         case 'input':
           return _parseInput(node, newCtx);
         case 'code':
@@ -90,8 +96,14 @@ class HtmlInlineParser {
           return [DocxLineBreak()];
         case 'a':
           final href = node.attributes['href'];
+          // Links are blue unless the author styled their colour (browsers
+          // and Word both override the inherited text colour for links).
+          final linkColor =
+              ColorUtils.parseCssColorProperty(combinedStyle, 'color') ??
+                  (href != null ? '0563C1' : null);
           return await parseInlines(node.nodes,
-              context: newCtx.copyWith(href: href ?? '#', isLink: true));
+              context: newCtx.copyWith(
+                  href: href ?? '#', isLink: true, colorHex: linkColor));
         case 'img':
           final img = await _imageParser.parseInlineImage(node);
           return img != null ? [img] : [];
@@ -181,7 +193,7 @@ class HtmlInlineParser {
 
   DocxText createText(String text, HtmlStyleContext ctx) {
     return DocxText(
-      text,
+      _applyTextTransform(text, ctx.textTransform),
       fontWeight: ctx.fontWeight,
       fontStyle: ctx.fontStyle,
       decorations: ctx.decorations,
@@ -200,6 +212,20 @@ class HtmlInlineParser {
       isEmboss: ctx.isEmboss,
       isImprint: ctx.isImprint,
     );
+  }
+
+  /// `lowercase`/`capitalize` have no DOCX run property, so they rewrite
+  /// the text (uppercase is kept as the `caps` property instead).
+  static String _applyTextTransform(String text, String? transform) {
+    switch (transform) {
+      case 'lowercase':
+        return text.toLowerCase();
+      case 'capitalize':
+        return text.replaceAllMapped(RegExp(r'(^|[\s\-])(\S)'),
+            (m) => '${m.group(1)}${m.group(2)!.toUpperCase()}');
+      default:
+        return text;
+    }
   }
 
   String _getText(dom.Node node) {

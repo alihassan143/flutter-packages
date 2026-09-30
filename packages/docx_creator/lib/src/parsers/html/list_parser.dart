@@ -28,8 +28,7 @@ class HtmlListParser {
     final currentLevel = (styleContext != null && styleContext.listLevel >= 0)
         ? styleContext.listLevel
         : level;
-    final startIndex =
-        int.tryParse(element.attributes['start'] ?? '') ?? 1;
+    final startIndex = int.tryParse(element.attributes['start'] ?? '') ?? 1;
 
     // A nested sublist's own bullet/numbered style so it can be applied as
     // a per-item override once flattened below (DocxListItem has no way to
@@ -40,8 +39,14 @@ class HtmlListParser {
     // full per-item numbering-format switching within a single numId would
     // require the abstract numbering definition to vary by level, which
     // this exporter doesn't currently support.
-    DocxListStyle nestedOverrideStyle(bool nestedOrdered) =>
-        nestedOrdered ? DocxListStyle.decimal : DocxListStyle.disc;
+    DocxListStyle nestedOverrideStyle(DocxList nested) {
+      // Keep an explicitly typed nested list's own style (e.g. `type="a"`).
+      if (nested.style.numberFormat != DocxNumberFormat.decimal ||
+          nested.style.bullet != const DocxListStyle().bullet) {
+        return nested.style;
+      }
+      return nested.isOrdered ? DocxListStyle.decimal : DocxListStyle.disc;
+    }
 
     for (var child in element.children) {
       if (child.localName == 'li') {
@@ -55,8 +60,8 @@ class HtmlListParser {
             } else if (result is DocxList) {
               for (var nestedItem in result.items) {
                 items.add(nestedItem.copyWith(
-                  overrideStyle: nestedItem.overrideStyle ??
-                      nestedOverrideStyle(result.isOrdered),
+                  overrideStyle:
+                      nestedItem.overrideStyle ?? nestedOverrideStyle(result),
                 ));
               }
             }
@@ -99,14 +104,62 @@ class HtmlListParser {
         for (var nested in nestedLists) {
           for (var nestedItem in nested.items) {
             items.add(nestedItem.copyWith(
-              overrideStyle: nestedItem.overrideStyle ??
-                  nestedOverrideStyle(nested.isOrdered),
+              overrideStyle:
+                  nestedItem.overrideStyle ?? nestedOverrideStyle(nested),
             ));
           }
         }
       }
     }
 
-    return DocxList(items: items, isOrdered: ordered, startIndex: startIndex);
+    final style = _listStyleFor(element, ordered);
+    return DocxList(
+      items: items,
+      // A marker-less list is emitted as an (empty) bullet list.
+      isOrdered: ordered && style.bullet.isNotEmpty,
+      startIndex: startIndex,
+      style: style,
+    );
+  }
+
+  /// Maps `type="a|A|i|I|1"` and CSS `list-style-type` to a list style.
+  DocxListStyle _listStyleFor(dom.Element element, bool ordered) {
+    final css =
+        context.mergeStyles(element.attributes['style'], element.classes);
+    final cssType =
+        RegExp(r'list-style(?:-type)?\s*:\s*([^;]+)', caseSensitive: false)
+            .firstMatch(css)
+            ?.group(1)
+            ?.toLowerCase();
+    String? type = cssType;
+    final attr = element.attributes['type'];
+    if (type == null && attr != null) {
+      type = switch (attr) {
+        'a' => 'lower-alpha',
+        'A' => 'upper-alpha',
+        'i' => 'lower-roman',
+        'I' => 'upper-roman',
+        '1' => 'decimal',
+        _ => attr.toLowerCase(),
+      };
+    }
+    if (type == null) return const DocxListStyle();
+    // `none`: no marker (an empty bullet, rendered as nothing in DOCX/PDF).
+    if (RegExp(r'(^|\s)none(\s|$)').hasMatch(type.trim())) {
+      return const DocxListStyle(bullet: '');
+    }
+    if (type.contains('lower-alpha') || type.contains('lower-latin')) {
+      return DocxListStyle.lowerAlpha;
+    }
+    if (type.contains('upper-alpha') || type.contains('upper-latin')) {
+      return DocxListStyle.upperAlpha;
+    }
+    if (type.contains('lower-roman')) return DocxListStyle.lowerRoman;
+    if (type.contains('upper-roman')) return DocxListStyle.upperRoman;
+    if (!ordered) {
+      if (type.contains('circle')) return DocxListStyle.circle;
+      if (type.contains('square')) return DocxListStyle.square;
+    }
+    return const DocxListStyle();
   }
 }

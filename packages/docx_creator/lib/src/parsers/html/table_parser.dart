@@ -121,14 +121,42 @@ class HtmlTableParser {
     final colSpan = int.tryParse(td.attributes['colspan'] ?? '1') ?? 1;
     final rowSpan = int.tryParse(td.attributes['rowspan'] ?? '1') ?? 1;
 
+    // Cell text-align (CSS or legacy `align`) applies to paragraphs that
+    // don't set their own; header cells are centered like in browsers.
+    final alignValue = RegExp(r'text-align\s*:\s*(\w+)', caseSensitive: false)
+            .firstMatch(style)
+            ?.group(1)
+            ?.toLowerCase() ??
+        td.attributes['align']?.toLowerCase() ??
+        (td.localName == 'th' ? 'center' : null);
+    final cellAlign = switch (alignValue) {
+      'left' || 'start' => DocxAlign.left,
+      'center' => DocxAlign.center,
+      'right' || 'end' => DocxAlign.right,
+      'justify' => DocxAlign.justify,
+      _ => null,
+    };
     final content = await _parseCellContent(
       td.nodes,
       isHeader: isHeader,
       colorHex: colorHex,
+      textAlign: cellAlign,
     );
+
+    final valign = (RegExp(r'vertical-align\s*:\s*(\w+)', caseSensitive: false)
+                .firstMatch(style)
+                ?.group(1) ??
+            td.attributes['valign'])
+        ?.toLowerCase();
+    final verticalAlign = switch (valign) {
+      'top' => DocxVerticalAlign.top,
+      'bottom' => DocxVerticalAlign.bottom,
+      _ => DocxVerticalAlign.center,
+    };
 
     return DocxTableCell(
       children: content,
+      verticalAlign: verticalAlign,
       colSpan: colSpan,
       rowSpan: rowSpan,
       shadingFill: shadingFill,
@@ -163,6 +191,7 @@ class HtmlTableParser {
     List<dom.Node> nodes, {
     bool isHeader = false,
     String? colorHex,
+    DocxAlign? textAlign,
   }) async {
     if (blockParser != null) {
       // Seed the row/cell's own text color and header weight as inherited
@@ -172,9 +201,12 @@ class HtmlTableParser {
       final seedContext = HtmlStyleContext(
         colorHex: colorHex,
         fontWeight: isHeader ? DocxFontWeight.bold : DocxFontWeight.normal,
+        // The cell's alignment is inherited by its paragraphs; one that
+        // sets its own (even `left`) keeps it.
+        textAlign: textAlign,
       );
-      final results = await blockParser!
-          .parseChildren(nodes, styleContext: seedContext);
+      final results =
+          await blockParser!.parseChildren(nodes, styleContext: seedContext);
       return results.whereType<DocxBlock>().toList();
     }
     final blocks = <DocxBlock>[];

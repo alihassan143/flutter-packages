@@ -41,7 +41,6 @@ Future<pw.Widget> buildImage(LayoutNode node) async {
     return pw.Container(
       width: node.style.width ?? 100,
       height: node.style.height ?? 100,
-      margin: node.style.margin ?? const pw.EdgeInsets.only(bottom: 8),
       decoration: pw.BoxDecoration(
         color: PdfColors.grey200,
         borderRadius: node.style.borderRadius != null
@@ -79,24 +78,37 @@ Future<pw.Widget> buildImage(LayoutNode node) async {
 
       // Build decoration if needed
       pw.BoxDecoration? decoration;
-      if (node.style.border != null || node.style.borderRadius != null) {
+      final border = node.style.resolvedBorder;
+      if (border != null || node.style.borderRadius != null) {
         decoration = pw.BoxDecoration(
-          border: node.style.border,
+          border: border,
           borderRadius: node.style.borderRadius != null
               ? pw.BorderRadius.circular(node.style.borderRadius!)
               : null,
         );
       }
 
+      final image = pw.MemoryImage(imageBytes);
+      // Without explicit dimensions, size the image like a browser does:
+      // one CSS pixel = 0.75pt.
+      var width = node.style.width ??
+          (node.style.height == null && image.width != null
+              ? image.width! * 0.75
+              : null);
+      // max-width only ever shrinks the image.
+      final maxWidth = node.style.maxWidth;
+      if (maxWidth != null && width != null && width > maxWidth) {
+        width = maxWidth;
+      }
+
       return pw.Container(
-        width: node.style.width,
+        width: width,
         height: node.style.height,
-        margin: node.style.margin ?? const pw.EdgeInsets.only(bottom: 8),
         decoration: decoration,
         child: pw.ClipRRect(
           horizontalRadius: node.style.borderRadius ?? 0,
           verticalRadius: node.style.borderRadius ?? 0,
-          child: pw.Image(pw.MemoryImage(imageBytes), fit: boxFit),
+          child: pw.Image(image, fit: boxFit),
         ),
       );
     }
@@ -108,7 +120,6 @@ Future<pw.Widget> buildImage(LayoutNode node) async {
   return pw.Container(
     width: node.style.width ?? 100,
     height: node.style.height ?? 50,
-    margin: node.style.margin ?? const pw.EdgeInsets.only(bottom: 8),
     decoration: pw.BoxDecoration(
       color: PdfColors.grey200,
       borderRadius: node.style.borderRadius != null

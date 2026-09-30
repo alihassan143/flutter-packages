@@ -30,6 +30,19 @@ class UnitConverter {
       return (number != null) ? (number * pxToPtRatio) : null;
     } else if (val.endsWith('pt')) {
       return double.tryParse(val.replaceAll('pt', ''));
+    } else if (val.endsWith('mm')) {
+      final number = double.tryParse(val.replaceAll('mm', ''));
+      return (number != null) ? (number * inToPtRatio / 25.4) : null;
+    } else if (val.endsWith('cm')) {
+      final number = double.tryParse(val.replaceAll('cm', ''));
+      return (number != null) ? (number * inToPtRatio / 2.54) : null;
+    } else if (val.endsWith('pc')) {
+      final number = double.tryParse(val.replaceAll('pc', ''));
+      return (number != null) ? (number * 12) : null;
+    } else if (val.endsWith('ex') || val.endsWith('ch')) {
+      final number = double.tryParse(val.substring(0, val.length - 2));
+      final base = elementFontSize ?? defaultBaseFontSizePt;
+      return (number != null) ? (number * base * 0.5) : null;
     } else if (val.endsWith('in')) {
       final number = double.tryParse(val.replaceAll('in', ''));
       return (number != null) ? (number * inToPtRatio) : null;

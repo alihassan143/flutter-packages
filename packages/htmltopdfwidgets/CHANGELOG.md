@@ -1,3 +1,22 @@
+## 2.2.0
+
+* **Rendering accuracy (new engine)** - output now tracks what a browser renders far more closely:
+    * **Whitespace**: browser-style collapsing. Adjacent inline elements (`Word<b>glued</b>`) are no longer split by an invented space, and whitespace between elements is kept. `<br>` inside a paragraph now breaks the line instead of being dropped.
+    * **Lists**: nested lists render as nested lists instead of being flattened into the parent item's text. Supports `type`, `start`, `reversed`, `value`, `list-style-type` (decimal, alpha, roman, greek, disc/circle/square), and per-depth bullets. Task-list items show only their checkbox.
+    * **Tables**: `colspan`/`rowspan`, block content in cells (paragraphs, lists, images), `<caption>`, cell/row CSS borders and backgrounds, `valign`/`vertical-align`, `cellpadding`, explicit column widths, content-weighted column widths, and repeating `<thead>` rows. `border="0"`/`border: none` removes the grid.
+    * **Margins**: vertical margins collapse between siblings and through parents; browser-default margins for headings, paragraphs, lists, blockquotes and `<pre>` (headings scale with `defaultFontSize`).
+    * **`<pre>`/`<code>`**: whitespace preserved, monospace (Courier) font, background and padding applied.
+    * **Inline**: `<sub>`/`<sup>` baseline shifts, `<small>`, `<big>`, `<ins>`, `<cite>`, `<kbd>`, `<font color/face/size>`, `<center>`, `<dl>/<dt>/<dd>`; links stay clickable on nested formatting (`<a><b>..</b></a>`).
+    * **Images**: sized at 1px = 0.75pt by default, `margin: auto`/`text-align` centering, per-side borders.
+* **CSS**:
+    * `<style>` blocks now support descendant/child/sibling combinators, attribute selectors, structural pseudo-classes (`:first-child`, `:nth-child(odd)`, ...), specificity ordering and `!important`. Multi-value declarations (`margin: 0 auto`) are no longer truncated, and stylesheet values go through the same parser as inline styles (units were previously ignored).
+    * Presentational attributes (`width`, `bgcolor`, `align`, ...) now sit below author CSS in the cascade, as in browsers.
+    * All 148 CSS named colors with spec values (e.g. `red` is `#FF0000`, `navy` is `#000080`), `#rgb`/`#rgba`/`#rrggbbaa`, `rgb()`/`rgba()` with percentages or space syntax, `hsl()`/`hsla()`.
+    * Longhands: `margin-*`, `padding-*`, `border-top/right/bottom/left`, `border-width/color/style`, `background`, `font` shorthand, `text-decoration-color/style` and combined decorations.
+    * `em`/`%`/keyword font sizes resolve against the parent; numeric `font-weight` (600+ is bold); `line-height` (unitless, %, length; inherited); `letter-spacing`; `text-transform`; `white-space`; `vertical-align: super/sub`; `mm`, `cm`, `pc`, `ex`, `ch` units.
+* **Defaults**: `HtmlTagStyle.codeBlockBackgroundColor` (inline `<code>`) and `codeblockColor` (`<pre>` background) now default to light grey instead of red/mid-grey. Links default to browser blue (`#0000EE`), `<th>` is bold and centered with no forced background, and `<blockquote>` is no longer italic.
+* Removed debug `print` output from the new engine.
+
 ## 2.1.1
 
 * **Branding & Documentation**:

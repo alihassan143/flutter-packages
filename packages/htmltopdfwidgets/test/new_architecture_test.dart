@@ -10,7 +10,8 @@ void main() {
   group('CSSStyle Tests', () {
     test('Parse simple CSS string', () {
       final style = CSSStyle.parse('color: red; font-size: 16px;');
-      expect(style.color, PdfColors.red);
+      // CSS `red` is #FF0000.
+      expect(style.color, const PdfColor(1, 0, 0));
       expect(style.fontSize, 12.0); // 16px * 0.75 = 12pt
     });
 
@@ -63,8 +64,8 @@ void main() {
       final div = root.children[0];
       final p = div.children[0];
 
-      expect(div.style.color, PdfColors.red);
-      expect(p.style.color, PdfColors.red); // Inherited
+      expect(div.style.color, const PdfColor(1, 0, 0));
+      expect(p.style.color, const PdfColor(1, 0, 0)); // Inherited
     });
 
     test('Parse attributes', () {

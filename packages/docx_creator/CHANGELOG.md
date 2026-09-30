@@ -1,3 +1,22 @@
+## 1.4.0
+
+### Fixed — PDF export accuracy
+- **Pagination now measures exactly what is drawn**: `PdfLayoutEngine` delegates paragraph, list and table-cell measurement (and paragraph/list page splitting) to the exporter's own line layout through the new `PdfBlockMeasurer` hook. Pagination used to wrap a plain-text approximation (regular font only, no bold/heading widths, different spacing), so content could run past the bottom margin and disappear, or leave large gaps. Paragraphs now split at the exact line the renderer would break on, and long lists split between items with their numbering continued.
+- **No invented spaces between runs**: adjacent runs with no whitespace between them (`Word<b>glued</b>`, `H<sub>2</sub>O`, `word</a>.`) were drawn as separate words with a space between. Whitespace is now tracked across run boundaries, glued runs wrap as one word, and multiple spaces keep their width (code indentation is preserved).
+- **Line and paragraph spacing honoured**: `lineSpacing`/`lineRule` (`auto`, `exact`, `atLeast`), `spacingBefore`/`spacingAfter` and `indentFirstLine` were ignored by the renderer. Space widths are measured in each run's own font, underlines/highlights/links now cover the spaces between words that share them, and justified lines ending in a hard break stay ragged.
+- **Lists**: markers follow the DOCX numbering (default bullets •/○/▪ and formats 1/a/i per level; custom `numberFormat`/`bullet` honoured), sit on the first line's baseline, and items are indented like Word (`indentPerLevel`/`hangingIndent`). List items (and lists in table cells, previously plain text) render links, tabs, images, line breaks and all run formatting.
+- **Tables**: a `colSpan` in the first row no longer drops columns (`DocxTable.resolvedGridColumns` now counts spans and row-spanned columns — this also fixes the `w:tblGrid` written to DOCX). Tables keep their real width instead of stretching to the page, honour `alignment`, percentage widths, cell margins, row heights and cell vertical alignment; cell paragraphs keep their alignment; images in cells are drawn; large block images are scaled to fit.
+- Monospace font families (`Courier New`, `monospace`, ...) render with Courier and are measured with Courier metrics; links without an explicit color use Word's hyperlink blue; all-caps/small-caps runs render in capitals; heading sizes mirror the DOCX heading styles (24/20/16pt at a 12pt base).
+
+### Fixed — HTML import
+- `<ol type="a|A|i|I">` and `list-style-type` map to list number formats / bullets (nested lists keep their own type).
+- `margin-top`/`margin-bottom`/`margin` map to paragraph spacing, `line-height` to line spacing, the `background` shorthand to shading, `align` attributes to alignment, and `text-transform: uppercase`/`font-variant: small-caps` to caps.
+- Table cells apply their `text-align`/`align` (and center `<th>` by default) and `vertical-align`/`valign`.
+- Links get the hyperlink color unless styled.
+
+### Fixed — DOCX reader
+- Nested list levels read from a DOCX no longer get doubled indentation: `indentPerLevel` is now stored per level, matching how the writer and PDF exporter apply it.
+
 ## 1.3.4
 
 ### Fixed

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
@@ -6,13 +8,43 @@ import 'css_style.dart';
 import 'image_builder_io.dart' if (dart.library.html) 'image_builder_web.dart'
     as image_builder;
 import 'layout/layout_node.dart';
-import 'render_node.dart';
+
+/// A laid-out block: its widgets plus the vertical margins it wants around
+/// it. Margins are kept separate so adjacent sibling margins can collapse
+/// (`max(bottom, top)`) like they do in a browser.
+class _Block {
+  final List<pw.Widget> widgets;
+  final double marginTop;
+  final double marginBottom;
+
+  const _Block(this.widgets, {this.marginTop = 0, this.marginBottom = 0});
+}
+
+/// Result of joining sibling blocks: widgets with the collapsed spacing
+/// between them, plus the outer margins of the first and last block.
+class _Flow {
+  final List<pw.Widget> widgets;
+  final double top;
+  final double bottom;
+
+  const _Flow(this.widgets, this.top, this.bottom);
+}
+
+/// Mutable state while collecting inline spans for one line box.
+class _InlineContext {
+  final spans = <pw.InlineSpan>[];
+
+  /// True at the start of a line, or after collapsible whitespace, so the
+  /// next collapsible space is dropped.
+  bool lastWasSpace = true;
+}
 
 /// [PdfBuilder] converts a tree of [LayoutNode]s into a list of [pw.Widget]s.
 ///
 /// It traverses the render tree and creates corresponding PDF widgets (e.g.,
-/// [pw.Container], [pw.Text], [pw.RichText], [pw.Table]) based on the
-/// node type and its computed [CSSStyle].
+/// [pw.Container], [pw.RichText], [pw.Table]) based on the node type and its
+/// computed [CSSStyle], following browser rules for whitespace collapsing,
+/// vertical margin collapsing, list markers and table spans.
 class PdfBuilder {
   /// The root node of the render tree.
   final LayoutNode root;
@@ -34,445 +66,568 @@ class PdfBuilder {
     this.fontFallback = const [],
   });
 
+  /// Depth of nested unordered lists (drives disc/circle/square markers).
+  int _listDepth = 0;
+
+  /// > 0 while building children of a horizontal flex row, where widgets
+  /// must not request infinite width.
+  int _rowDepth = 0;
+
+  /// Content longer than this (in characters) is split into several
+  /// [pw.RichText] widgets so it can flow across pages.
+  static const int _chunkChars = 1500;
+
+  pw.Font? _courier, _courierBold, _courierOblique, _courierBoldOblique;
+
   /// Builds the PDF widgets from the render tree.
   Future<List<pw.Widget>> build() async {
-    return await _buildBlock(root);
+    final blocks = await _buildFlow(root.children, root.style);
+    // The page margins already separate content from the page edge, so the
+    // outermost leading/trailing margins are dropped.
+    return _join(blocks).widgets;
   }
 
-  /// Builds widgets for a block-level node.
-  ///
-  /// This method handles:
-  /// - Specific block tags (img, table, hr, blockquote, pre, etc.).
-  /// - Block elements containing only inline content (rendered as [pw.RichText]).
-  /// - Generic block elements with mixed content (recursively building children).
-  Future<List<pw.Widget>> _buildBlock(LayoutNode node) async {
-    print('Building block: ${node.tagName} children:${node.children.length}');
-    final widgets = <pw.Widget>[];
+  // ---------------------------------------------------------------------------
+  // Block flow
+  // ---------------------------------------------------------------------------
 
-    if (node.display == Display.none) return widgets;
-
-    // Handle specific tags that map to specific Widgets
-    if (node.tagName == 'img') {
-      return [await _buildImage(node)];
-    } else if (node.tagName == 'table') {
-      return [await _buildTable(node)];
-    } else if (node.tagName == 'hr') {
-      return [
-        pw.Divider(
-            color: node.style.border?.bottom.color ?? PdfColors.grey400,
-            thickness: node.style.border?.bottom.width ?? 1.0)
-      ];
-    } else if (node.tagName == 'blockquote') {
-      return [await _buildBlockquote(node)];
-    } else if (node.tagName == 'pre') {
-      return [_buildPreBlock(node)];
-    } else if (node.tagName == 'br') {
-      return [pw.SizedBox(height: 12)]; // Line break as vertical space
+  bool _isInlineLevel(LayoutNode node) {
+    if (node.tagName == '#text' || node.tagName == 'br') return true;
+    if (node.tagName == 'input') {
+      return node.attributes['type'] == 'checkbox';
     }
-
-    return await _buildBlockContent(node);
+    if (node.tagName == 'img') return node.style.display == Display.inline;
+    return node.display == Display.inline;
   }
 
-  /// Builds the content of a block (children).
-  Future<List<pw.Widget>> _buildBlockContent(LayoutNode node) async {
-    final widgets = <pw.Widget>[];
+  /// Builds a sequence of sibling nodes, grouping consecutive inline-level
+  /// nodes into anonymous line boxes.
+  Future<List<_Block>> _buildFlow(
+      List<LayoutNode> children, CSSStyle containerStyle) async {
+    final blocks = <_Block>[];
+    var inlineGroup = <LayoutNode>[];
 
-    // Check if this block contains only inline content (text, spans, b, i, etc.)
-    // If so, render as RichText widgets (may be split into multiple for page spanning)
-    if (_hasOnlyInlineContent(node)) {
-      final richTextWidgets = _buildRichTextFromNode(node);
-      if (richTextWidgets.isNotEmpty) {
-        return richTextWidgets;
-      }
-      return [];
+    Future<void> flushInline() async {
+      if (inlineGroup.isEmpty) return;
+      final widgets = await _buildInlineRun(inlineGroup, containerStyle);
+      inlineGroup = [];
+      if (widgets.isNotEmpty) blocks.add(_Block(widgets));
     }
 
-    // Generic block processing - mixed content
-    List<LayoutNode> inlineGroup = [];
-    int i = 0;
-
-    while (i < node.children.length) {
-      final child = node.children[i];
-      if (child.display == Display.none) {
-        i++;
+    for (final child in children) {
+      if (child.display == Display.none) continue;
+      if (_isInlineLevel(child)) {
+        inlineGroup.add(child);
         continue;
       }
-
-      if (child.display == Display.inline ||
-          child.tagName == '#text' ||
-          (child.tagName == 'input' &&
-              child.attributes['type'] == 'checkbox') ||
-          child.tagName == 'label') {
-        // Handle br tags specially in inline context
-        if (child.tagName == 'br') {
-          if (inlineGroup.isNotEmpty) {
-            widgets.addAll(_buildRichText(inlineGroup, node.style));
-            inlineGroup = [];
-          }
-          widgets.add(pw.SizedBox(height: 8));
-        } else {
-          inlineGroup.add(child);
-        }
-      } else {
-        if (inlineGroup.isNotEmpty) {
-          widgets.addAll(_buildRichText(inlineGroup, node.style));
-          inlineGroup = [];
-        }
-
-        // Check if child is a list item inside a list
-        if (child.tagName == 'li' &&
-            (node.tagName == 'ul' || node.tagName == 'ol')) {
-          widgets.add(await _buildListItem(
-              child, node.tagName == 'ol', node.children.indexOf(child)));
-        } else {
-          widgets.addAll(await _buildBlockChild(child));
-        }
-
-        // Add spacing between block elements
-        if (widgets.isNotEmpty && i < node.children.length - 1) {
-          final nextNonEmpty = node.children.skip(i + 1).firstWhere(
-                (n) =>
-                    n.display != Display.none && n.tagName != '#text' ||
-                    (n.text?.trim().isNotEmpty ?? false),
-                orElse: () => LayoutNode(
-                  originalNode:
-                      RenderNode(tagName: '', style: const CSSStyle()),
-                  computedStyle: const CSSStyle(),
-                  constraints: const BoxConstraints(),
-                ),
-              );
-          if (nextNonEmpty.tagName.isNotEmpty) {
-            // Add small spacing between block elements
-            widgets.add(pw.SizedBox(height: 4));
-          }
-        }
-      }
-      i++;
+      await flushInline();
+      final block = await _buildBlockNode(child);
+      if (block != null) blocks.add(block);
     }
-
-    if (inlineGroup.isNotEmpty) {
-      widgets.addAll(_buildRichText(inlineGroup, node.style));
-    }
-
-    return widgets;
+    await flushInline();
+    return blocks;
   }
 
-  /// Checks if a node contains only inline content (no nested block elements).
-  bool _hasOnlyInlineContent(LayoutNode node) {
-    for (var child in node.children) {
-      if ((child.display == Display.block ||
-              child.display == Display.flex ||
-              child.display == Display.table) &&
-          child.tagName != '#text') {
-        // Check if it's a known block element
-        if ([
-          'div',
-          'p',
-          'h1',
-          'h2',
-          'h3',
-          'h4',
-          'h5',
-          'h6',
-          'ul',
-          'ol',
-          'li',
-          'table',
-          'blockquote',
-          'pre',
-          'img',
-          'input',
-          'header',
-          'footer',
-          'article',
-          'section',
-          'aside',
-          'nav',
-          'main',
-          'figure',
-          'figcaption'
-        ].contains(child.tagName)) {
-          return false;
-        }
+  /// Joins sibling blocks, inserting collapsed margins between them.
+  _Flow _join(List<_Block> blocks) {
+    final widgets = <pw.Widget>[];
+    if (blocks.isEmpty) return const _Flow([], 0, 0);
+    for (var i = 0; i < blocks.length; i++) {
+      final block = blocks[i];
+      if (i > 0) {
+        final gap = math.max(blocks[i - 1].marginBottom, block.marginTop);
+        if (gap > 0) widgets.add(pw.SizedBox(height: gap));
       }
+      widgets.addAll(block.widgets);
     }
-    return true;
+    return _Flow(widgets, blocks.first.marginTop, blocks.last.marginBottom);
   }
 
-  /// Builds a list of [pw.RichText] widgets from a node that contains only inline content.
-  ///
-  /// Since RichText does NOT automatically span pages, we split large text content
-  /// into smaller chunks. Each chunk becomes a separate RichText widget that fits
-  /// on a page, allowing the overall content to span pages when placed in MultiPage.
-  ///
-  /// The chunking is based on span count to approximate page-friendly sizes.
-  List<pw.Widget> _buildRichTextFromNode(LayoutNode node) {
-    final spans = <pw.InlineSpan>[];
-    _collectInlineSpans(node, spans);
+  Future<_Block?> _buildBlockNode(LayoutNode node) async {
+    if (node.display == Display.none) return null;
+    final style = node.style;
+    final marginTop = style.margin?.top ?? 0;
+    final marginBottom = style.margin?.bottom ?? 0;
 
+    switch (node.tagName) {
+      case 'img':
+        return _Block([
+          _horizontalMargins(_alignBlock(await _buildImage(node), style), style)
+        ], marginTop: marginTop, marginBottom: marginBottom);
+      case 'table':
+        return _Block(await _buildTable(node),
+            marginTop: marginTop, marginBottom: marginBottom);
+      case 'hr':
+        final rb = style.resolvedBorder;
+        bool visible(pw.BorderSide s) => s.style.paint && s.width > 0;
+        // First *visible* side: `border: 0; border-top: 1px solid` leaves
+        // an invisible (non-null) bottom side.
+        final side = rb == null
+            ? const pw.BorderSide(width: 1, color: PdfColors.grey)
+            : [rb.bottom, rb.top, rb.left, rb.right]
+                .firstWhere(visible, orElse: () => rb.bottom);
+        return _Block([
+          _horizontalMargins(
+              pw.Divider(
+                height: side.width,
+                thickness: side.width,
+                color: side.color,
+                borderStyle: side.style,
+              ),
+              style)
+        ], marginTop: marginTop, marginBottom: marginBottom);
+      case 'ul':
+      case 'ol':
+      case 'menu':
+        return _buildList(node);
+      case 'input':
+      case 'br':
+        return null;
+    }
+
+    if (node.display == Display.flex) {
+      return _Block(await _buildFlex(node),
+          marginTop: marginTop, marginBottom: marginBottom);
+    }
+
+    if (style.whiteSpace == WhiteSpace.pre ||
+        style.whiteSpace == WhiteSpace.preWrap) {
+      return _buildPreBlock(node);
+    }
+
+    return _buildContainerBlock(node);
+  }
+
+  /// A generic block container (div, p, h1, blockquote, li content, ...).
+  Future<_Block?> _buildContainerBlock(LayoutNode node) async {
+    final style = node.style;
+    final flow = _join(await _buildFlow(node.children, style));
+    return _decorateBlock(node, flow);
+  }
+
+  /// Applies padding, border, background, width and horizontal margins to
+  /// already-built content, collapsing child margins through the box when
+  /// it has no top/bottom padding or border.
+  _Block? _decorateBlock(LayoutNode node, _Flow flow) {
+    final style = node.style;
+    final padding = style.padding ?? pw.EdgeInsets.zero;
+    final border = style.resolvedBorder;
+    final background = style.backgroundColor;
+
+    bool sideVisible(pw.BorderSide? s) =>
+        s != null && s.style.paint && s.width > 0;
+    final hasTopEdge = padding.top > 0 || sideVisible(border?.top);
+    final hasBottomEdge = padding.bottom > 0 || sideVisible(border?.bottom);
+
+    var marginTop = style.margin?.top ?? 0;
+    var marginBottom = style.margin?.bottom ?? 0;
+    final widgets = <pw.Widget>[...flow.widgets];
+
+    if (hasTopEdge) {
+      if (flow.top > 0 && widgets.isNotEmpty) {
+        widgets.insert(0, pw.SizedBox(height: flow.top));
+      }
+    } else {
+      marginTop = math.max(marginTop, flow.top);
+    }
+    if (hasBottomEdge) {
+      if (flow.bottom > 0 && widgets.isNotEmpty) {
+        widgets.add(pw.SizedBox(height: flow.bottom));
+      }
+    } else {
+      marginBottom = math.max(marginBottom, flow.bottom);
+    }
+
+    if (widgets.isEmpty) {
+      // An empty box still shows its padding, border and background, e.g.
+      // `<div style="border-bottom:1px solid">` separators.
+      double edge(pw.BorderSide? side) => sideVisible(side) ? side!.width : 0.0;
+      final boxHeight = style.height ??
+          (padding.top +
+              padding.bottom +
+              edge(border?.top) +
+              edge(border?.bottom));
+      if (boxHeight > 0 &&
+          (background != null || border != null || style.height != null)) {
+        return _Block([
+          _horizontalMargins(
+              _maxWidth(
+                  pw.Container(
+                    width: style.width ?? _fullWidth,
+                    height: boxHeight,
+                    decoration: _boxDecoration(style),
+                  ),
+                  style),
+              style)
+        ], marginTop: marginTop, marginBottom: marginBottom);
+      }
+      return (marginTop > 0 || marginBottom > 0)
+          ? _Block(const [], marginTop: marginTop, marginBottom: marginBottom)
+          : null;
+    }
+
+    final needsBox = background != null ||
+        border != null ||
+        style.width != null ||
+        style.maxWidth != null ||
+        style.height != null;
+
+    if (!needsBox) {
+      final result = <pw.Widget>[];
+      if (padding.top > 0) result.add(pw.SizedBox(height: padding.top));
+      for (final w in widgets) {
+        result.add(_horizontalInsets(w, padding.left, padding.right, style));
+      }
+      if (padding.bottom > 0) result.add(pw.SizedBox(height: padding.bottom));
+      return _Block(result, marginTop: marginTop, marginBottom: marginBottom);
+    }
+
+    if (_isSmall(node)) {
+      final content = widgets.length == 1
+          ? widgets.first
+          : pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: widgets);
+      pw.Widget box = pw.Container(
+        width: style.width ?? _fullWidth,
+        height: style.height,
+        padding: padding,
+        decoration: _boxDecoration(style),
+        child: content,
+      );
+      box = _maxWidth(box, style);
+      if (style.width != null || style.maxWidth != null) {
+        box = _alignBlock(box, style);
+      }
+      return _Block([_horizontalMargins(box, style)],
+          marginTop: marginTop, marginBottom: marginBottom);
+    }
+
+    // Large blocks: decorate each child separately so the block can still
+    // break across pages, drawing top/bottom edges as caps.
+    final side = pw.Border(
+      left: border?.left ?? pw.BorderSide.none,
+      right: border?.right ?? pw.BorderSide.none,
+    );
+    final result = <pw.Widget>[];
+    result.add(pw.Container(
+      width: _fullWidth,
+      height: padding.top,
+      decoration: pw.BoxDecoration(
+        color: background,
+        border: pw.Border(
+            top: border?.top ?? pw.BorderSide.none,
+            left: side.left,
+            right: side.right),
+      ),
+    ));
+    for (final w in widgets) {
+      result.add(pw.Container(
+        width: _fullWidth,
+        padding: pw.EdgeInsets.only(left: padding.left, right: padding.right),
+        decoration: pw.BoxDecoration(color: background, border: side),
+        child: w,
+      ));
+    }
+    result.add(pw.Container(
+      width: _fullWidth,
+      height: padding.bottom,
+      decoration: pw.BoxDecoration(
+        color: background,
+        border: pw.Border(
+            bottom: border?.bottom ?? pw.BorderSide.none,
+            left: side.left,
+            right: side.right),
+      ),
+    ));
+    return _Block(result.map((w) => _horizontalMargins(w, style)).toList(),
+        marginTop: marginTop, marginBottom: marginBottom);
+  }
+
+  double? get _fullWidth => _rowDepth > 0 ? null : double.infinity;
+
+  /// Caps a box at CSS `max-width` (it still fills up to that width).
+  pw.Widget _maxWidth(pw.Widget child, CSSStyle style) {
+    final max = style.maxWidth;
+    if (max == null || _rowDepth > 0) return child;
+    return pw.ConstrainedBox(
+        constraints: pw.BoxConstraints(maxWidth: max), child: child);
+  }
+
+  /// Whether a block is small enough to be wrapped in a single non-spanning
+  /// [pw.Container] (which cannot break across pages).
+  bool _isSmall(LayoutNode node) {
+    var chars = 0;
+    var blocks = 0;
+    var heavy = false;
+    void walk(LayoutNode n) {
+      chars += n.text?.length ?? 0;
+      if (n.tagName == 'table' || n.tagName == 'pre' || n.tagName == 'img') {
+        heavy = true;
+      }
+      if (n.tagName == 'li' || n.tagName == 'p' || n.tagName == 'div') {
+        blocks++;
+      }
+      for (final c in n.children) {
+        walk(c);
+      }
+    }
+
+    walk(node);
+    return !heavy && chars < 1200 && blocks < 12;
+  }
+
+  pw.Widget _horizontalMargins(pw.Widget child, CSSStyle style) {
+    final left = style.margin?.left ?? 0;
+    final right = style.margin?.right ?? 0;
+    if (left <= 0 && right <= 0) return child;
+    return pw.Padding(
+        padding: pw.EdgeInsets.only(
+            left: math.max(0, left), right: math.max(0, right)),
+        child: child);
+  }
+
+  pw.Widget _horizontalInsets(
+      pw.Widget child, double padLeft, double padRight, CSSStyle style) {
+    final left = padLeft + math.max(0, style.margin?.left ?? 0);
+    final right = padRight + math.max(0, style.margin?.right ?? 0);
+    if (left <= 0 && right <= 0) return child;
+    return pw.Padding(
+        padding: pw.EdgeInsets.only(left: left, right: right), child: child);
+  }
+
+  /// Centers/right-aligns a fixed-size block per `margin: auto` or the
+  /// inherited `text-align` (browsers align images in line boxes).
+  pw.Widget _alignBlock(pw.Widget child, CSSStyle style) {
+    if (_rowDepth > 0) return child;
+    if (style.centerHorizontally == true ||
+        style.textAlign == pw.TextAlign.center) {
+      return pw.Align(alignment: pw.Alignment.topCenter, child: child);
+    }
+    if (style.textAlign == pw.TextAlign.right) {
+      return pw.Align(alignment: pw.Alignment.topRight, child: child);
+    }
+    return child;
+  }
+
+  pw.BoxDecoration? _boxDecoration(CSSStyle style) {
+    final border = style.resolvedBorder;
+    if (style.backgroundColor == null && border == null) return null;
+    final uniform = border != null &&
+        _sameSide(border.top, border.right) &&
+        _sameSide(border.top, border.bottom) &&
+        _sameSide(border.top, border.left);
+    return pw.BoxDecoration(
+      color: style.backgroundColor,
+      border: border,
+      // Rounded corners are only supported with a uniform border.
+      borderRadius: style.borderRadius != null &&
+              style.borderRadius! > 0 &&
+              (border == null || uniform)
+          ? pw.BorderRadius.circular(style.borderRadius!)
+          : null,
+    );
+  }
+
+  bool _sameSide(pw.BorderSide a, pw.BorderSide b) =>
+      a.width == b.width && a.color == b.color && a.style == b.style;
+
+  // ---------------------------------------------------------------------------
+  // Inline content
+  // ---------------------------------------------------------------------------
+
+  Future<List<pw.Widget>> _buildInlineRun(
+      List<LayoutNode> nodes, CSSStyle blockStyle) async {
+    final ctx = _InlineContext();
+    for (final node in nodes) {
+      await _collectInline(node, ctx, null);
+    }
+    return _richTextWidgets(ctx.spans, blockStyle);
+  }
+
+  /// Builds line boxes from inline [spans], splitting very long content
+  /// into several widgets so it can flow across pages.
+  List<pw.Widget> _richTextWidgets(
+      List<pw.InlineSpan> input, CSSStyle blockStyle) {
+    final spans = _nbspToSpace(_trimTrailingSpace(input));
     if (spans.isEmpty) return [];
 
-    // Check if total text length is large. If so, split into chunks.
-    // This allows paragraphs with backgrounds/borders to span pages.
-    int totalLen = 0;
-    for (var s in spans) {
-      if (s is pw.TextSpan) totalLen += (s.text ?? '').length;
-    }
+    final textAlign = blockStyle.textAlign ?? pw.TextAlign.left;
+    pw.Widget make(List<pw.InlineSpan> chunk) => pw.RichText(
+          overflow: pw.TextOverflow.span,
+          text: pw.TextSpan(children: chunk),
+          textAlign: textAlign,
+          textDirection: blockStyle.textDirection,
+        );
 
-    if (totalLen > 2000 || spans.length > 20) {
-      final chunks = _splitSpans(spans, 1500);
-      return chunks
-          .map((chunk) => pw.RichText(
-                overflow: pw.TextOverflow.span,
-                text: pw.TextSpan(children: chunk),
-                textAlign: node.style.textAlign ?? pw.TextAlign.left,
-                textDirection: node.style.textDirection,
-              ))
-          .toList();
+    final totalLen = _spanLength(spans);
+    if (totalLen > 2000) {
+      return _splitSpans(spans, _chunkChars).map(make).toList();
     }
-
-    return [
-      pw.RichText(
-        overflow: pw.TextOverflow.span,
-        text: pw.TextSpan(children: spans),
-        textAlign: node.style.textAlign ?? pw.TextAlign.left,
-        textDirection: node.style.textDirection,
-      )
-    ];
+    return [make(spans)];
   }
 
-  Future<pw.Widget> _buildImage(LayoutNode node) async {
-    return await image_builder.buildImage(node);
+  int _spanLength(List<pw.InlineSpan> spans) {
+    var total = 0;
+    for (final s in spans) {
+      total += s is pw.TextSpan ? (s.text?.length ?? 0) : 1;
+    }
+    return total;
   }
 
-  Future<pw.Widget> _buildTable(LayoutNode node) async {
-    final rows = <pw.TableRow>[];
-    bool isFirstRow = true;
-
-    for (var child in node.children) {
-      if (child.tagName == 'tr' ||
-          child.tagName == 'tbody' ||
-          child.tagName == 'thead' ||
-          child.tagName == 'tfoot') {
-        if (child.tagName == 'tr') {
-          rows.addAll(await _buildTableRows(child,
-              isHeaderRow:
-                  isFirstRow && child.children.any((c) => c.tagName == 'th')));
-          isFirstRow = false;
-        } else {
-          // Handle thead/tbody/tfoot children
-          final isHead = child.tagName == 'thead';
-          for (var grandChild in child.children) {
-            if (grandChild.tagName == 'tr') {
-              rows.addAll(
-                  await _buildTableRows(grandChild, isHeaderRow: isHead));
-            }
-          }
-          if (isHead) isFirstRow = false;
-        }
-      }
-    }
-
-    // Determine border style
-    final borderCollapse = node.style.borderCollapse ?? true;
-    final borderColor = node.style.border?.top.color ?? PdfColors.grey600;
-    final borderWidth = node.style.border?.top.width ?? 0.5;
-
-    // Container prevents spanning. Use Padding/SizedBox for margin.
-    // Detect if table is potentially larger than a page to avoid TooManyPageException
-    // when using FlexColumnWidth (which makes columns narrower and taller)
-    final maxColChars = <int, int>{};
-    for (var child in node.children) {
-      final rows = (child.tagName == 'tr' ? [child] : child.children);
-      for (var row in rows) {
-        if (row.tagName == 'tr') {
-          for (int i = 0; i < row.children.length; i++) {
-            final cell = row.children[i];
-            int getLength(LayoutNode n) {
-              int l = n.text?.length ?? 0;
-              for (var c in n.children) {
-                l += getLength(c);
-              }
-              return l;
-            }
-
-            final len = getLength(cell);
-            maxColChars[i] =
-                (maxColChars[i] ?? 0) < len ? len : maxColChars[i]!;
-          }
-        }
-      }
-    }
-
-    bool isExtreme = false;
-    for (var val in maxColChars.values) {
-      if (val > 4000) isExtreme = true;
-    }
-
-    // Default to fixed (equal widths) as requested.
-    // If a table has very large cells, we use a weighted flex layout.
-    // IF the table is EXTREME (> 4000 chars), we MUST use Intrinsic to stand a chance
-    // of fitting the row on a single page (since rows cannot span pages).
-    Map<int, pw.TableColumnWidth> columnWidths = {};
-    if (node.style.tableLayout == TableLayout.auto || isExtreme) {
-      // Explicitly requested or extreme content
-      columnWidths = {};
-    } else {
-      for (var entry in maxColChars.entries) {
-        // Give 3x weight to column with massive content (> 1500 chars)
-        final weight = entry.value > 1500 ? 3.0 : 1.0;
-        columnWidths[entry.key] = pw.FlexColumnWidth(weight);
-      }
-    }
-
-    return pw.Padding(
-      padding: node.style.margin ?? const pw.EdgeInsets.symmetric(vertical: 8),
-      child: pw.Table(
-        border: borderCollapse
-            ? pw.TableBorder.all(color: borderColor, width: borderWidth)
-            : pw.TableBorder.symmetric(
-                inside: pw.BorderSide(color: borderColor, width: borderWidth),
-                outside: pw.BorderSide(color: borderColor, width: borderWidth),
-              ),
-        defaultVerticalAlignment: pw.TableCellVerticalAlignment.full,
-        columnWidths: columnWidths.isEmpty ? null : columnWidths,
-        defaultColumnWidth: const pw.FlexColumnWidth(),
-        children: rows,
-      ),
-    );
-  }
-
-  Future<List<pw.TableRow>> _buildTableRows(LayoutNode node,
-      {bool isHeaderRow = false}) async {
-    final allCellSpans = <List<pw.InlineSpan>>[];
-    final cellStyles = <LayoutNode>[];
-    final alignments = <pw.Alignment>[];
-    int maxChunks = 1;
-
-    // First pass: collect all content and determine split points
-    for (var child in node.children) {
-      if (child.tagName == 'td' || child.tagName == 'th') {
-        final spans = <pw.InlineSpan>[];
-        _collectInlineSpans(child, spans);
-        allCellSpans.add(spans);
-        cellStyles.add(child);
-
-        // Determine cell alignment
-        pw.Alignment alignment = pw.Alignment.centerLeft;
-        if (child.style.textAlign == pw.TextAlign.center) {
-          alignment = pw.Alignment.center;
-        } else if (child.style.textAlign == pw.TextAlign.right) {
-          alignment = pw.Alignment.centerRight;
-        }
-
-        // Vertical alignment
-        if (child.style.verticalAlign == VerticalAlign.top) {
-          alignment = pw.Alignment(alignment.x, -1);
-        } else if (child.style.verticalAlign == VerticalAlign.bottom) {
-          alignment = pw.Alignment(alignment.x, 1);
-        }
-        alignments.add(alignment);
-
-        // Count total chars to see if we split
-        int totalLen = 0;
-        for (var s in spans) {
-          if (s is pw.TextSpan) totalLen += (s.text ?? '').length;
-        }
-        if (totalLen > 2000) {
-          final chunks = (totalLen / 1500).ceil();
-          if (chunks > maxChunks) maxChunks = chunks;
-        }
-      }
-    }
-
-    if (maxChunks <= 1) {
-      // Standard non-splitting row
-      final cells = <pw.Widget>[];
-      for (int i = 0; i < allCellSpans.length; i++) {
-        final child = cellStyles[i];
-        final isHeader = child.tagName == 'th' || isHeaderRow;
-        final cellContent = _buildCellRichText(allCellSpans[i], isHeader);
-        cells.add(_wrapCell(child, cellContent, alignments[i], isHeader));
-      }
-      return [
-        pw.TableRow(
-          decoration: node.style.backgroundColor != null
-              ? pw.BoxDecoration(color: node.style.backgroundColor)
-              : null,
-          children: cells,
-        )
+  /// Renders non-breaking spaces as plain spaces (many PDF fonts lack a
+  /// U+00A0 glyph). Runs after trimming so `&nbsp;` is never collapsed away.
+  List<pw.InlineSpan> _nbspToSpace(List<pw.InlineSpan> spans) => [
+        for (final s in spans)
+          if (s is pw.TextSpan && (s.text?.contains('\u00A0') ?? false))
+            pw.TextSpan(
+              text: s.text!.replaceAll('\u00A0', ' '),
+              style: s.style,
+              baseline: s.baseline,
+              annotation: s.annotation,
+            )
+          else
+            s
       ];
-    }
 
-    // Splitting mode: Divide long cells into multiple rows
-    final splitCellSpans = <List<List<pw.InlineSpan>>>[];
-    for (var spans in allCellSpans) {
-      splitCellSpans.add(_splitSpans(spans, 1500));
-    }
-
-    final tableRows = <pw.TableRow>[];
-    for (int chunkIdx = 0; chunkIdx < maxChunks; chunkIdx++) {
-      final cells = <pw.Widget>[];
-      for (int cellIdx = 0; cellIdx < splitCellSpans.length; cellIdx++) {
-        final child = cellStyles[cellIdx];
-        final isHeader = child.tagName == 'th' || isHeaderRow;
-        final chunks = splitCellSpans[cellIdx];
-
-        if (chunkIdx < chunks.length) {
-          final cellContent = _buildCellRichText(chunks[chunkIdx], isHeader);
-          // Only show background/decoration on the first chunk row for headers
-          // or if requested specifically.
-          final showDecor = chunkIdx == 0;
-          cells.add(_wrapCell(child, cellContent, alignments[cellIdx],
-              showDecor ? isHeader : false));
-        } else {
-          cells.add(pw.SizedBox());
-        }
+  /// Removes collapsible trailing whitespace (and drops a content-free run).
+  List<pw.InlineSpan> _trimTrailingSpace(List<pw.InlineSpan> spans) {
+    final result = [...spans];
+    while (result.isNotEmpty) {
+      final last = result.last;
+      if (last is! pw.TextSpan) break;
+      final text = last.text ?? '';
+      final trimmed = text.replaceAll(RegExp(r' +$'), '');
+      if (trimmed.isEmpty) {
+        result.removeLast();
+        continue;
       }
-      tableRows.add(pw.TableRow(children: cells));
+      if (trimmed != text) {
+        result[result.length - 1] = pw.TextSpan(
+          text: trimmed,
+          style: last.style,
+          baseline: last.baseline,
+          annotation: last.annotation,
+        );
+      }
+      break;
     }
-
-    return tableRows;
+    // Only ASCII whitespace is collapsible; Dart's trim() would also strip
+    // U+00A0 and drop `<p>&nbsp;</p>` spacer lines.
+    final hasContent = result.any((s) =>
+        s is! pw.TextSpan ||
+        (s.text ?? '').replaceAll(RegExp(r'[ \t\n\r\f]'), '').isNotEmpty);
+    return hasContent ? result : const [];
   }
 
-  pw.Widget _wrapCell(LayoutNode node, pw.Widget content,
-      pw.Alignment alignment, bool isHeader) {
-    final hasDecoration = node.style.backgroundColor != null || isHeader;
+  Future<void> _collectInline(
+      LayoutNode node, _InlineContext ctx, String? href) async {
+    if (node.display == Display.none) return;
 
-    if (!hasDecoration && alignment == pw.Alignment.centerLeft) {
-      return pw.Padding(
-        padding: node.style.padding ?? const pw.EdgeInsets.all(6),
-        child: content,
-      );
+    if (node.tagName == 'br') {
+      ctx.spans.add(pw.TextSpan(text: '\n', style: _mapTextStyle(node.style)));
+      ctx.lastWasSpace = true;
+      return;
+    }
+
+    if (node.tagName == 'input' && node.attributes['type'] == 'checkbox') {
+      ctx.spans.add(pw.WidgetSpan(
+        child: _buildCheckbox(node),
+        baseline: _checkboxBaseline(node),
+      ));
+      ctx.lastWasSpace = false;
+      return;
+    }
+
+    if (node.tagName == 'img') {
+      ctx.spans.add(pw.WidgetSpan(child: await _buildImage(node)));
+      ctx.lastWasSpace = false;
+      return;
+    }
+
+    if (node.tagName == '#text') {
+      final text = _processText(node.text ?? '', node.style, ctx);
+      if (text.isEmpty) return;
+      ctx.spans.add(pw.TextSpan(
+        text: text,
+        style: _mapTextStyle(node.style),
+        baseline: _baselineShift(node.style),
+        annotation: href != null ? pw.AnnotationUrl(href) : null,
+      ));
+      return;
+    }
+
+    final link = node.tagName == 'a' && node.attributes['href'] != null
+        ? node.attributes['href']
+        : href;
+    for (final child in node.children) {
+      await _collectInline(child, ctx, link);
+    }
+  }
+
+  /// Applies `white-space` collapsing and `text-transform` to a text run.
+  String _processText(String raw, CSSStyle style, _InlineContext ctx) {
+    final ws = style.whiteSpace ?? WhiteSpace.normal;
+    String text;
+    if (ws == WhiteSpace.pre || ws == WhiteSpace.preWrap) {
+      text = raw.replaceAll('\r\n', '\n').replaceAll('\t', '    ');
+      if (text.isEmpty) return '';
+      ctx.lastWasSpace = text.endsWith('\n');
     } else {
-      return pw.Container(
-        padding: node.style.padding ?? const pw.EdgeInsets.all(6),
-        color:
-            node.style.backgroundColor ?? (isHeader ? PdfColors.grey200 : null),
-        alignment: alignment,
-        child: content,
-      );
+      if (ws == WhiteSpace.preLine) {
+        text = raw
+            .replaceAll('\r\n', '\n')
+            .replaceAll(RegExp(r'[ \t\f]+'), ' ')
+            .replaceAll(RegExp(r' ?\n ?'), '\n');
+      } else {
+        text = raw.replaceAll(RegExp(r'[ \t\n\r\f]+'), ' ');
+      }
+      if (ctx.lastWasSpace && text.startsWith(' ')) text = text.substring(1);
+      if (text.isEmpty) return '';
+      ctx.lastWasSpace = text.endsWith(' ') || text.endsWith('\n');
+    }
+    // Non-breaking spaces survive collapsing and trimming; [_nbspToSpace]
+    // turns them into plain spaces once lines are assembled.
+    return _transform(text, style.textTransform);
+  }
+
+  String _transform(String text, TextTransform? transform) {
+    switch (transform) {
+      case TextTransform.uppercase:
+        return text.toUpperCase();
+      case TextTransform.lowercase:
+        return text.toLowerCase();
+      case TextTransform.capitalize:
+        return text.replaceAllMapped(RegExp(r'(^|[\s\-])(\S)'),
+            (m) => '${m.group(1)}${m.group(2)!.toUpperCase()}');
+      default:
+        return text;
     }
   }
 
-  pw.Widget _buildCellRichText(List<pw.InlineSpan> spans, bool isHeader) {
-    if (spans.isEmpty) return pw.Text('');
-
-    if (isHeader) {
-      return pw.RichText(
-        overflow: pw.TextOverflow.span,
-        text: pw.TextSpan(
-          children: spans,
-          style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
-        ),
-        textAlign: pw.TextAlign.center,
-      );
+  double _baselineShift(CSSStyle style) {
+    final size = style.fontSize ?? 12;
+    switch (style.baselineShift) {
+      case BaselineShift.superscript:
+        return size * 0.45;
+      case BaselineShift.subscript:
+        return -size * 0.25;
+      default:
+        return 0;
     }
+  }
 
-    return pw.RichText(
-      overflow: pw.TextOverflow.span,
-      text: pw.TextSpan(children: spans),
-    );
+  double _checkboxBaseline(LayoutNode node) {
+    switch (node.style.verticalAlign) {
+      case VerticalAlign.top:
+        return 6;
+      case VerticalAlign.bottom:
+        return -2;
+      case VerticalAlign.baseline:
+        return 0;
+      default:
+        return -3;
+    }
   }
 
   List<List<pw.InlineSpan>> _splitSpans(List<pw.InlineSpan> spans, int limit) {
@@ -480,150 +635,370 @@ class PdfBuilder {
     var currentChunk = <pw.InlineSpan>[];
     int currentLen = 0;
 
+    void flush() {
+      if (currentChunk.isNotEmpty) result.add(currentChunk);
+      currentChunk = [];
+      currentLen = 0;
+    }
+
     for (var span in spans) {
       if (span is pw.TextSpan) {
         String text = span.text ?? '';
-        if (currentLen + text.length <= limit) {
-          currentChunk.add(span);
-          currentLen += text.length;
-        } else {
-          // Need to split this span or move to next chunk
-          if (currentChunk.isNotEmpty) {
-            result.add(currentChunk);
-            currentChunk = [];
-            currentLen = 0;
+        while (currentLen + text.length > limit) {
+          // Break at a newline or space so words aren't cut in half.
+          final room = limit - currentLen;
+          var cut = text.lastIndexOf('\n', room);
+          if (cut <= 0) cut = text.lastIndexOf(' ', room);
+          if (cut <= 0) {
+            if (currentChunk.isNotEmpty) {
+              flush();
+              continue;
+            }
+            cut = room.clamp(1, text.length);
+          } else {
+            cut += 1; // keep the separator on this chunk
           }
-
-          // Split massive text span into chunks
-          while (text.length > limit) {
-            result.add([
-              pw.TextSpan(
-                text: text.substring(0, limit),
-                style: span.style,
-                annotation: span.annotation,
-              )
-            ]);
-            text = text.substring(limit);
-          }
+          currentChunk.add(pw.TextSpan(
+            text: text.substring(0, cut).replaceAll(RegExp(r'\n$'), ''),
+            style: span.style,
+            baseline: span.baseline,
+            annotation: span.annotation,
+          ));
+          flush();
+          text = text.substring(cut);
+        }
+        if (text.isNotEmpty) {
           currentChunk.add(pw.TextSpan(
             text: text,
             style: span.style,
+            baseline: span.baseline,
             annotation: span.annotation,
           ));
-          currentLen = text.length;
+          currentLen += text.length;
         }
       } else {
-        // WidgetSpan or other, treat as 1 char
-        if (currentLen + 1 > limit && currentChunk.isNotEmpty) {
-          result.add(currentChunk);
-          currentChunk = [];
-          currentLen = 0;
-        }
+        if (currentLen + 1 > limit) flush();
         currentChunk.add(span);
         currentLen += 1;
       }
     }
 
-    if (currentChunk.isNotEmpty) {
-      result.add(currentChunk);
-    }
+    flush();
     return result;
   }
 
-  Future<pw.Widget> _buildListItem(
-      LayoutNode node, bool isOrdered, int index) async {
-    // Collect inline content from list item
-    final spans = <pw.InlineSpan>[];
-    _collectInlineSpans(node, spans);
+  // ---------------------------------------------------------------------------
+  // Text style
+  // ---------------------------------------------------------------------------
 
-    pw.Widget bullet;
-    if (isOrdered) {
-      bullet = pw.Text('${index + 1}.');
-    } else {
-      // Draw a bullet circle
-      bullet = pw.Container(
-        width: 4,
-        height: 4,
-        decoration: const pw.BoxDecoration(
-          color: PdfColors.black,
-          shape: pw.BoxShape.circle,
+  static const _monospaceFamilies = {
+    'courier',
+    'courier new',
+    'monospace',
+    'consolas',
+    'menlo',
+    'monaco',
+    'lucida console',
+    'source code pro',
+    'ui-monospace',
+    'sfmono-regular',
+  };
+
+  pw.Font? _fontFor(CSSStyle style) {
+    final family = style.fontFamily?.toLowerCase();
+    if (family == null || !_monospaceFamilies.contains(family)) return null;
+    final bold = style.fontWeight == pw.FontWeight.bold;
+    final italic = style.fontStyle == pw.FontStyle.italic;
+    if (bold && italic) {
+      return _courierBoldOblique ??= pw.Font.courierBoldOblique();
+    }
+    if (bold) return _courierBold ??= pw.Font.courierBold();
+    if (italic) return _courierOblique ??= pw.Font.courierOblique();
+    return _courier ??= pw.Font.courier();
+  }
+
+  /// Extra inter-line spacing to reach the CSS line height. `pdf` lines are
+  /// already about 1.15em tall (ascent + descent).
+  double? _lineSpacing(CSSStyle style) {
+    final fontSize = style.fontSize ?? 12;
+    final target = style.lineHeight ??
+        (style.lineHeightFactor != null
+            ? style.lineHeightFactor! * fontSize
+            : null);
+    if (target == null) return null;
+    return math.max(0, target - fontSize * 1.15);
+  }
+
+  pw.TextStyle _mapTextStyle(CSSStyle style) {
+    final font = _fontFor(style);
+    return pw.TextStyle(
+      color: style.color,
+      fontSize: style.fontSize,
+      fontWeight: style.fontWeight,
+      fontStyle: style.fontStyle,
+      font: font,
+      fontBold: font,
+      fontItalic: font,
+      fontBoldItalic: font,
+      decoration: style.textDecoration,
+      decorationColor: style.textDecorationColor,
+      decorationStyle: style.textDecorationStyle,
+      letterSpacing: style.letterSpacing,
+      fontFallback: fontFallback,
+      lineSpacing: _lineSpacing(style),
+      background: style.backgroundColor != null
+          ? pw.BoxDecoration(color: style.backgroundColor)
+          : null,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Specific blocks
+  // ---------------------------------------------------------------------------
+
+  Future<pw.Widget> _buildImage(LayoutNode node) async {
+    return await image_builder.buildImage(node);
+  }
+
+  Future<_Block?> _buildPreBlock(LayoutNode node) async {
+    final ctx = _InlineContext();
+    for (final child in node.children) {
+      await _collectInline(child, ctx, null);
+    }
+    // Drop a single trailing newline, as browsers do.
+    var spans = ctx.spans;
+    if (spans.isNotEmpty && spans.last is pw.TextSpan) {
+      final last = spans.last as pw.TextSpan;
+      final text = last.text ?? '';
+      if (text.endsWith('\n')) {
+        spans = [
+          ...spans.sublist(0, spans.length - 1),
+          pw.TextSpan(
+              text: text.substring(0, text.length - 1),
+              style: last.style,
+              annotation: last.annotation),
+        ];
+      }
+    }
+    spans = _nbspToSpace(spans);
+    if (spans.isEmpty) return _decorateBlock(node, const _Flow([], 0, 0));
+
+    // Chunk by lines so long listings can break across pages.
+    final chunks =
+        _spanLength(spans) > 2000 ? _splitSpans(spans, _chunkChars) : [spans];
+    final widgets = chunks
+        .map((chunk) => pw.RichText(
+              overflow: pw.TextOverflow.span,
+              softWrap: node.style.whiteSpace != WhiteSpace.pre,
+              text: pw.TextSpan(children: chunk),
+              textAlign: node.style.textAlign ?? pw.TextAlign.left,
+            ))
+        .toList();
+    return _decorateBlock(node, _Flow(widgets, 0, 0));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lists
+  // ---------------------------------------------------------------------------
+
+  Future<_Block?> _buildList(LayoutNode node) async {
+    final style = node.style;
+    final isOrdered = node.tagName == 'ol';
+    final reversed = node.attributes.containsKey('reversed');
+    final items = node.children.where((c) => c.tagName == 'li').toList();
+
+    var counter = int.tryParse(node.attributes['start'] ?? '') ??
+        (reversed ? items.length : 1);
+
+    final defaultBullet = const ['disc', 'circle', 'square'][_listDepth % 3];
+    final type = style.listStyleType ?? (isOrdered ? 'decimal' : defaultBullet);
+    final indent = style.padding?.left ?? 30.0;
+
+    if (!isOrdered) _listDepth++;
+    final blocks = <_Block>[];
+    try {
+      for (final child in node.children) {
+        if (child.display == Display.none) continue;
+        if (child.tagName != 'li') {
+          if (child.tagName == '#text') continue;
+          final b = await _buildBlockNode(child);
+          if (b != null) {
+            blocks.add(_Block(
+                b.widgets
+                    .map((w) => pw.Padding(
+                        padding: pw.EdgeInsets.only(left: indent), child: w))
+                    .toList(),
+                marginTop: b.marginTop,
+                marginBottom: b.marginBottom));
+          }
+          continue;
+        }
+
+        final explicit = int.tryParse(child.attributes['value'] ?? '');
+        if (explicit != null) counter = explicit;
+        // Task-list items (`<li><input type=checkbox>`) show only the box.
+        final firstContent = child.children.firstWhere(
+            (c) => c.tagName != '#text' || (c.text?.trim().isNotEmpty ?? false),
+            orElse: () => child);
+        final isTask = firstContent.tagName == 'input' &&
+            firstContent.attributes['type'] == 'checkbox';
+        final itemType = isTask ? 'none' : (child.style.listStyleType ?? type);
+        final marker = _buildMarker(itemType, counter, child.style);
+        counter += reversed ? -1 : 1;
+
+        final flow = _join(await _buildFlow(child.children, child.style));
+        final content = flow.widgets.isEmpty
+            ? <pw.Widget>[
+                pw.SizedBox(height: (child.style.fontSize ?? 12) * 1.15)
+              ]
+            : flow.widgets;
+
+        final tableRows = <pw.TableRow>[];
+        for (var i = 0; i < content.length; i++) {
+          tableRows.add(pw.TableRow(children: [
+            i == 0 ? marker : pw.SizedBox(),
+            content[i],
+          ]));
+        }
+        final item = pw.Table(
+          columnWidths: {
+            0: pw.FixedColumnWidth(indent),
+            1: const pw.FlexColumnWidth(),
+          },
+          children: tableRows,
+        );
+        blocks.add(
+            _Block([item], marginTop: flow.top, marginBottom: flow.bottom));
+      }
+    } finally {
+      if (!isOrdered) _listDepth--;
+    }
+
+    final joined = _join(blocks);
+    return _Block(
+      joined.widgets.map((w) => _horizontalMargins(w, style)).toList(),
+      marginTop: math.max(style.margin?.top ?? 0, joined.top),
+      marginBottom: math.max(style.margin?.bottom ?? 0, joined.bottom),
+    );
+  }
+
+  pw.Widget _buildMarker(String type, int index, CSSStyle itemStyle) {
+    final fontSize = itemStyle.fontSize ?? 12;
+    final color =
+        tagStyle.bulletListIconColor ?? itemStyle.color ?? PdfColors.black;
+    // Match the first line's height so the marker sits on its baseline.
+    final lineHeight = fontSize * 1.15 + (_lineSpacing(itemStyle) ?? 0);
+
+    pw.Widget shape(pw.BoxShape boxShape, {bool filled = true}) {
+      final size = fontSize * 0.36;
+      return pw.Container(
+        height: lineHeight,
+        alignment: pw.Alignment.centerRight,
+        padding: pw.EdgeInsets.only(right: fontSize * 0.5),
+        child: pw.Container(
+          width: size,
+          height: size,
+          decoration: pw.BoxDecoration(
+            color: filled ? color : null,
+            border: filled ? null : pw.Border.all(color: color, width: 0.7),
+            shape: boxShape,
+          ),
         ),
       );
     }
 
-    // If spans is empty, it means we have block content (e.g. <li><div>...</div></li>)
-    // We must allow this content to span pages.
-    // We cannot wrap it in Row(Bullet, Expanded(Column)).
-    // Instead, we will try to render the bullet and the first block side-by-side using a Row,
-    // and then the rest of the blocks below.
-    // However, if the first block is HUGE, the Row will crash.
-    // Ideally, we treat the bullet as a small widget in a Stack or absolutely positioned?
-    // pdf package doesn't support Stack spanning.
-
-    // Compromise: Use a Table? Tables span pages.
-    // A table with 2 columns: Bullet, Content.
-
-    pw.Widget? contentWidget;
-
-    if (spans.isNotEmpty) {
-      contentWidget = pw.RichText(
-        overflow: pw.TextOverflow.span,
-        text: pw.TextSpan(children: spans),
-        textAlign: node.style.textAlign ?? pw.TextAlign.left,
-      );
-    } else {
-      // Block content
-      final children = await _buildBlockChild(node);
-      if (children.isNotEmpty) {
-        // We wrap block content in a generic SpanningWidget aka Column? No.
-        // We can use a Wrap? No.
-        // We must use a Table to align Bullet with Content AND allow spanning.
-        // But children is List<Widget>. Table takes TableRow.
-        // We can verify if Table supports arbitrary widgets spanning. Yes, inside methods.
-
-        // Actually, simplest is to just flatten it and accept bullet alignment might be tricky?
-        // Or use Table.
-
-        final tableRows = <pw.TableRow>[];
-        for (var i = 0; i < children.length; i++) {
-          tableRows.add(pw.TableRow(children: [
-            i == 0
-                ? pw.Container(
-                    alignment: pw.Alignment.topRight,
-                    padding: const pw.EdgeInsets.only(right: 5),
-                    child: bullet)
-                : pw.SizedBox(),
-            children[i]
-          ]));
-        }
-
-        return pw.Table(columnWidths: {
-          0: const pw.FixedColumnWidth(20),
-          1: const pw.FlexColumnWidth(),
-        }, children: tableRows);
-      }
-      return pw.SizedBox();
+    switch (type) {
+      case 'none':
+        return pw.SizedBox();
+      case 'disc':
+        return shape(pw.BoxShape.circle);
+      case 'circle':
+        return shape(pw.BoxShape.circle, filled: false);
+      case 'square':
+        return shape(pw.BoxShape.rectangle);
     }
 
-    // For simple inline content, Row is technically fine unless text is > 1 page.
-    // But text > 1 page wraps. Row DOES NOT WRAP/SPAN.
-    // So even for text, we should use Table for robustness!
-
-    return pw.Table(columnWidths: {
-      0: const pw.FixedColumnWidth(20),
-      1: const pw.FlexColumnWidth(),
-    }, children: [
-      pw.TableRow(
-          verticalAlignment: pw.TableCellVerticalAlignment.middle,
-          children: [
-            pw.Container(
-                alignment: pw.Alignment.topRight,
-                padding: const pw.EdgeInsets.only(right: 5),
-                child: bullet),
-            contentWidget
-          ])
-    ]);
+    final label = '${_formatCounter(type, index)}.';
+    final base = _mapTextStyle(itemStyle.merge(const CSSStyle(
+        textDecoration: pw.TextDecoration.none, backgroundColor: null)));
+    return pw.Padding(
+      padding: pw.EdgeInsets.only(right: fontSize * 0.4),
+      child: pw.Text(
+        label,
+        textAlign: pw.TextAlign.right,
+        style: tagStyle.listIndexStyle != null
+            ? base.merge(tagStyle.listIndexStyle)
+            : base,
+      ),
+    );
   }
+
+  String _formatCounter(String type, int n) {
+    switch (type) {
+      case 'lower-alpha':
+      case 'lower-latin':
+        return _alpha(n).toLowerCase();
+      case 'upper-alpha':
+      case 'upper-latin':
+        return _alpha(n);
+      case 'lower-roman':
+        return _roman(n).toLowerCase();
+      case 'upper-roman':
+        return _roman(n);
+      case 'lower-greek':
+        const greek = 'αβγδεζηθικλμνξοπρστυφχψω';
+        return n >= 1 && n <= greek.length ? greek[n - 1] : '$n';
+      case 'decimal-leading-zero':
+        return n.toString().padLeft(2, '0');
+      default:
+        return '$n';
+    }
+  }
+
+  String _alpha(int n) {
+    if (n <= 0) return '$n';
+    var value = n;
+    final buf = StringBuffer();
+    while (value > 0) {
+      value--;
+      buf.write(String.fromCharCode(65 + value % 26));
+      value ~/= 26;
+    }
+    return buf.toString().split('').reversed.join();
+  }
+
+  String _roman(int n) {
+    if (n <= 0 || n >= 4000) return '$n';
+    const values = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1];
+    const symbols = [
+      'M',
+      'CM',
+      'D',
+      'CD',
+      'C',
+      'XC',
+      'L',
+      'XL',
+      'X',
+      'IX',
+      'V',
+      'IV',
+      'I'
+    ];
+    var value = n;
+    final buf = StringBuffer();
+    for (var i = 0; i < values.length; i++) {
+      while (value >= values[i]) {
+        buf.write(symbols[i]);
+        value -= values[i];
+      }
+    }
+    return buf.toString();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Checkbox
+  // ---------------------------------------------------------------------------
 
   pw.Widget _buildCheckbox(LayoutNode node) {
     final bool checked = node.attributes.containsKey('checked');
@@ -633,10 +1008,6 @@ class PdfBuilder {
       return tagStyle.checkboxBuilder!(checked);
     }
 
-    // Priority 2: Use custom SVG icons if provided
-    // (Note: SVG rendering requires svg_to_pdf package which is not a dependency)
-    // For now, we'll create a styled widget that can be customized
-
     final size = tagStyle.checkboxSize;
     final checkedColor = tagStyle.checkedIconColor ?? PdfColors.blue;
     final uncheckedColor = tagStyle.uncheckedIconColor ?? PdfColors.white;
@@ -644,6 +1015,7 @@ class PdfBuilder {
     return pw.Container(
       width: size,
       height: size,
+      margin: const pw.EdgeInsets.only(right: 4),
       decoration: pw.BoxDecoration(
         border: pw.Border.all(color: PdfColors.black, width: 1.5),
         color: checked ? checkedColor : uncheckedColor,
@@ -664,519 +1036,426 @@ class PdfBuilder {
     );
   }
 
-  Future<pw.Widget> _buildBlockquote(LayoutNode node) async {
-    final content = await _buildBlockContent(node);
+  // ---------------------------------------------------------------------------
+  // Flex
+  // ---------------------------------------------------------------------------
 
-    // Blockquote usually has a side border.
-    // Container(decoration + Column) prevents spanning.
-    // We can use a Table with 2 columns: Border line, Content.
-    // Table spans pages.
+  Future<List<pw.Widget>> _buildFlex(LayoutNode node) async {
+    final style = node.style;
+    final isRow = style.flexDirection != FlexDirection.column &&
+        style.flexDirection != FlexDirection.columnReverse;
 
-    final tableRows = <pw.TableRow>[];
-
-    // We only put the border on the left column.
-    // How to effectively make a continuous border?
-    // Table border is per cell or grid.
-    // If we use TableBorder(left: ...), it applies to table.
-    // Let's try wrapping content in a Table.
-
-    // A single cell table can span!
-
-    // If we just want a left border, we can use Table with left border.
-
-    // Wait, content is a List<Widget>.
-    // To mix widgets into Table, we need Rows.
-    // If we put all widgets in one cell, we are back to Column (no span).
-    // So we must put EACH widget in a separate TableRow.
-
-    for (var child in content) {
-      tableRows.add(pw.TableRow(children: [child]));
-    }
-
-    // Use Padding instead of Container to allow spanning
-    return pw.Padding(
-      padding: (const pw.EdgeInsets.symmetric(vertical: 8, horizontal: 16)) +
-          (const pw.EdgeInsets.only(left: 12)),
-      child: pw.Table(
-        border: const pw.TableBorder(
-          left: pw.BorderSide(color: PdfColors.grey400, width: 3),
-        ),
-        children: tableRows,
-      ),
-    );
-  }
-
-  pw.Widget _buildPreBlock(LayoutNode node) {
-    // Collect all text from pre block
-    String text = _collectText(node);
-
-    return pw.Padding(
-      padding: const pw.EdgeInsets.symmetric(vertical: 8) +
-          const pw.EdgeInsets.all(8),
-      child: pw.Text(
-        text,
-        style: const pw.TextStyle(
-          fontSize: 10,
-
-          // font: // monospace font should be here if available
-        ),
-      ),
-    );
-  }
-
-  String _collectText(LayoutNode node) {
-    final buffer = StringBuffer();
-    if (node.text != null) {
-      buffer.write(node.text);
-    }
-    for (var child in node.children) {
-      buffer.write(_collectText(child));
-    }
-    return buffer.toString();
-  }
-
-  Future<List<pw.Widget>> _buildBlockChild(LayoutNode node) async {
-    // This node is a block element.
-
-    // Recursive call to get children widgets
-    List<pw.Widget> childrenWidgets;
-
-    if (node.display == Display.flex) {
-      childrenWidgets = [];
-      for (var child in node.children) {
+    if (isRow) _rowDepth++;
+    final childrenWidgets = <pw.Widget>[];
+    try {
+      for (final child in node.children) {
         if (child.display == Display.none) continue;
-        final childWidgets = await _buildBlockChild(child);
-        pw.Widget childWidget = childWidgets.length == 1
-            ? childWidgets.first
-            : pw.Column(children: childWidgets);
+        List<pw.Widget> built;
+        if (_isInlineLevel(child)) {
+          built = await _buildInlineRun([child], style);
+        } else {
+          final block = await _buildBlockNode(child);
+          built = block?.widgets ?? const [];
+        }
+        if (built.isEmpty) continue;
+        pw.Widget childWidget = built.length == 1
+            ? built.first
+            : pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: built);
 
-        if (child.style.flexGrow != null && child.style.flexGrow! > 0) {
-          childWidget =
-              pw.Expanded(child: childWidget, flex: child.style.flexGrow!);
+        final grow = child.style.flexGrow ?? 0;
+        if (grow > 0) {
+          childWidget = pw.Expanded(child: childWidget, flex: grow);
+        } else if (isRow && child.style.width == null) {
+          // CSS flex items shrink to fit (flex-shrink: 1).
+          childWidget = pw.Flexible(child: childWidget);
         }
         childrenWidgets.add(childWidget);
       }
-    } else {
-      childrenWidgets = await _buildBlock(node);
+    } finally {
+      if (isRow) _rowDepth--;
     }
 
-    // Build decoration from node style
-    final decoration = _buildBoxDecoration(node.style);
-    final hasDecoration = decoration != null ||
-        node.style.padding != null ||
-        node.style.margin != null;
-
-    // Flex block explicitly wraps all children inside a single pw.Flex object
-    if (node.display == Display.flex) {
-      pw.Axis direction = pw.Axis.horizontal;
-      if (node.style.flexDirection == FlexDirection.column ||
-          node.style.flexDirection == FlexDirection.columnReverse) {
-        direction = pw.Axis.vertical;
-      }
-
-      pw.MainAxisAlignment mainAlign = pw.MainAxisAlignment.start;
-      if (node.style.justifyContent == JustifyContent.center) {
+    pw.MainAxisAlignment mainAlign;
+    switch (style.justifyContent) {
+      case JustifyContent.center:
         mainAlign = pw.MainAxisAlignment.center;
-      } else if (node.style.justifyContent == JustifyContent.spaceAround) {
+        break;
+      case JustifyContent.spaceAround:
         mainAlign = pw.MainAxisAlignment.spaceAround;
-      } else if (node.style.justifyContent == JustifyContent.spaceBetween) {
+        break;
+      case JustifyContent.spaceBetween:
         mainAlign = pw.MainAxisAlignment.spaceBetween;
-      } else if (node.style.justifyContent == JustifyContent.spaceEvenly) {
+        break;
+      case JustifyContent.spaceEvenly:
         mainAlign = pw.MainAxisAlignment.spaceEvenly;
-      } else if (node.style.justifyContent == JustifyContent.flexEnd) {
+        break;
+      case JustifyContent.flexEnd:
         mainAlign = pw.MainAxisAlignment.end;
-      }
+        break;
+      default:
+        mainAlign = pw.MainAxisAlignment.start;
+    }
 
-      pw.CrossAxisAlignment crossAlign =
-          pw.CrossAxisAlignment.stretch; // default for CSS is usually stretch
-      if (node.style.alignItems == AlignItems.center) {
+    pw.CrossAxisAlignment crossAlign;
+    switch (style.alignItems) {
+      case AlignItems.center:
         crossAlign = pw.CrossAxisAlignment.center;
-      } else if (node.style.alignItems == AlignItems.flexStart) {
-        crossAlign = pw.CrossAxisAlignment.start;
-      } else if (node.style.alignItems == AlignItems.flexEnd) {
+        break;
+      case AlignItems.flexEnd:
         crossAlign = pw.CrossAxisAlignment.end;
-      }
-
-      final flexWidget = pw.Flex(
-        direction: direction,
-        mainAxisAlignment: mainAlign,
-        crossAxisAlignment: crossAlign,
-        children: node.style.flexDirection == FlexDirection.rowReverse ||
-                node.style.flexDirection == FlexDirection.columnReverse
-            ? childrenWidgets.reversed.toList()
-            : childrenWidgets,
-      );
-
-      return [
-        pw.Container(
-          width: node.style.width,
-          height: node.style.height,
-          padding: node.style.padding,
-          margin: node.style.margin,
-          decoration: decoration,
-          child: flexWidget,
-        )
-      ];
+        break;
+      case AlignItems.flexStart:
+      case AlignItems.baseline:
+        crossAlign = pw.CrossAxisAlignment.start;
+        break;
+      default:
+        // CSS default is stretch; in a row that needs a bounded height, so
+        // fall back to start.
+        crossAlign =
+            isRow ? pw.CrossAxisAlignment.start : pw.CrossAxisAlignment.stretch;
     }
 
-    // Empty blocks with decoration (like colored divs with explicit size)
-    if (childrenWidgets.isEmpty) {
-      if (hasDecoration &&
-          (node.style.width != null || node.style.height != null)) {
-        return [
-          pw.Container(
-            width: node.style.width,
-            height: node.style.height,
-            padding: node.style.padding,
-            margin: node.style.margin,
-            decoration: decoration,
-          )
-        ];
-      }
-      return [];
-    }
-
-    // Determine if this is a "small" block that can safely use Container wrapper
-    // Headers (h1-h6), blockquotes, and single-content blocks can be wrapped
-    final isSmallBlock = _isSmallBlock(node, childrenWidgets);
-
-    if (isSmallBlock && hasDecoration) {
-      // Small block - wrap everything in a decorated Container
-      // This is safe for headers, titles, short paragraphs, etc.
-      pw.Widget content;
-      if (childrenWidgets.length == 1) {
-        content = childrenWidgets.first;
-      } else {
-        // For small blocks with multiple children, use Column
-        // This is acceptable since small blocks fit on a page
-        content = pw.Column(
-          crossAxisAlignment: node.style.textAlign == pw.TextAlign.center
-              ? pw.CrossAxisAlignment.center
-              : node.style.textAlign == pw.TextAlign.right
-                  ? pw.CrossAxisAlignment.end
-                  : pw.CrossAxisAlignment.start,
-          children: childrenWidgets,
-        );
-      }
-
-      // Determine container alignment based on text-align
-      pw.Alignment? alignment;
-      if (node.style.textAlign == pw.TextAlign.center) {
-        alignment = pw.Alignment.center;
-      } else if (node.style.textAlign == pw.TextAlign.right) {
-        alignment = pw.Alignment.centerRight;
-      }
-
-      return [
-        pw.Container(
-          width: node.style.width,
-          padding: node.style.padding,
-          margin: node.style.margin,
-          decoration: decoration,
-          alignment: alignment,
-          child: content,
-        )
-      ];
-    }
-
-    // Large structural blocks - apply decorations to individual children
-    // This enables page spanning while preserving visual styling
-    if (hasDecoration) {
-      return _applyBlockDecorationToChildren(
-        childrenWidgets,
-        node.style,
-        decoration,
-      );
-    }
-
-    // No decoration - just return children with spacing
-    final topSpace =
-        (node.style.margin?.top ?? 0) + (node.style.padding?.top ?? 0);
-    final bottomSpace =
-        (node.style.margin?.bottom ?? 0) + (node.style.padding?.bottom ?? 0);
-
-    final result = <pw.Widget>[];
-    if (topSpace > 0) result.add(pw.SizedBox(height: topSpace));
-    result.addAll(childrenWidgets);
-    if (bottomSpace > 0) result.add(pw.SizedBox(height: bottomSpace));
-
-    return result;
-  }
-
-  /// Determines if a block is "small" enough to safely wrap in a Container
-  /// VERY conservative - only headers and simple blockquotes
-  /// Paragraphs, divs, and other blocks may contain long content that exceeds page height
-  bool _isSmallBlock(LayoutNode node, List<pw.Widget> children) {
-    // Only very short headers are truly guaranteed to be small.
-    // If they contain too much text, they might still exceed a page.
-    if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].contains(node.tagName)) {
-      final text = _collectText(node);
-      return text.length < 500; // Only small headers
-    }
-
-    // Blockquotes/Pre with very little content
-    if ((node.tagName == 'blockquote' || node.tagName == 'pre') &&
-        children.length == 1) {
-      final text = _collectText(node);
-      return text.length < 200;
-    }
-
-    return false;
-  }
-
-  /// For large structural blocks, apply background decoration using top/middle/bottom
-  /// This creates a unified visual block while still allowing page spanning
-  List<pw.Widget> _applyBlockDecorationToChildren(
-    List<pw.Widget> children,
-    CSSStyle style,
-    pw.BoxDecoration? decoration,
-  ) {
-    final result = <pw.Widget>[];
-    final leftPad = (style.padding?.left ?? 0) + (style.margin?.left ?? 0);
-    final rightPad = (style.padding?.right ?? 0) + (style.margin?.right ?? 0);
-    final topSpace = (style.margin?.top ?? 0) + (style.padding?.top ?? 0);
-    final bottomSpace =
-        (style.margin?.bottom ?? 0) + (style.padding?.bottom ?? 0);
-
-    // Add top spacing with background and top border
-    if (topSpace > 0 || decoration != null) {
-      result.add(pw.Container(
-        height: topSpace > 0 ? topSpace : null,
-        padding: topSpace > 0 ? null : const pw.EdgeInsets.only(top: 8),
-        decoration: decoration != null
-            ? pw.BoxDecoration(
-                color: decoration.color,
-                border: decoration.border?.top != null
-                    ? pw.Border(top: decoration.border!.top)
-                    : null,
-              )
-            : null,
-      ));
-    }
-
-    // Apply background and horizontal padding to each child
-    for (final child in children) {
-      if (decoration?.color != null) {
-        // We MUST wrap in Container for background color,
-        // but this WILL prevent page breaking if the child is large.
-        result.add(pw.Container(
-          padding: pw.EdgeInsets.only(left: leftPad, right: rightPad),
-          decoration: pw.BoxDecoration(color: decoration!.color),
-          child: child,
-        ));
-      } else if (leftPad > 0 || rightPad > 0) {
-        // If no background, use Padding which might be more bridge-friendly in some contexts
-        // though usually pdf treats it similarly. But it's safer than Container(decoration:...).
-        result.add(pw.Padding(
-          padding: pw.EdgeInsets.only(left: leftPad, right: rightPad),
-          child: child,
-        ));
-      } else {
-        result.add(child);
-      }
-    }
-
-    // Add bottom spacing with background and bottom border
-    if (bottomSpace > 0 || decoration != null) {
-      result.add(pw.Container(
-        height: bottomSpace > 0 ? bottomSpace : null,
-        padding: bottomSpace > 0 ? null : const pw.EdgeInsets.only(bottom: 8),
-        decoration: decoration != null
-            ? pw.BoxDecoration(
-                color: decoration.color,
-                border: decoration.border?.bottom != null
-                    ? pw.Border(bottom: decoration.border!.bottom)
-                    : null,
-              )
-            : null,
-      ));
-    }
-
-    return result;
-  }
-
-  List<pw.Widget> _buildRichText(List<LayoutNode> nodes, CSSStyle parentStyle) {
-    final spans = <pw.InlineSpan>[];
-
-    for (var node in nodes) {
-      _collectInlineSpans(node, spans);
-    }
-
-    if (spans.isEmpty) return [];
-
-    // Check for large content to split into spanning-friendly chunks
-    int totalLen = 0;
-    for (var s in spans) {
-      if (s is pw.TextSpan) totalLen += (s.text ?? '').length;
-    }
-
-    if (totalLen > 2000 || spans.length > 20) {
-      final chunks = _splitSpans(spans, 1500);
-      return chunks
-          .map((chunk) => pw.RichText(
-                overflow: pw.TextOverflow.span,
-                text: pw.TextSpan(children: chunk),
-                textAlign: parentStyle.textAlign ?? pw.TextAlign.left,
-                textDirection: parentStyle.textDirection,
-              ))
-          .toList();
-    }
+    final reverse = style.flexDirection == FlexDirection.rowReverse ||
+        style.flexDirection == FlexDirection.columnReverse;
+    final flexWidget = pw.Flex(
+      direction: isRow ? pw.Axis.horizontal : pw.Axis.vertical,
+      mainAxisAlignment: mainAlign,
+      crossAxisAlignment: crossAlign,
+      children: reverse ? childrenWidgets.reversed.toList() : childrenWidgets,
+    );
 
     return [
-      pw.RichText(
-        overflow: pw.TextOverflow.span,
-        text: pw.TextSpan(children: spans),
-        textAlign: parentStyle.textAlign ?? pw.TextAlign.left,
-        textDirection: parentStyle.textDirection,
-      )
+      _horizontalMargins(
+          pw.Container(
+            width: style.width,
+            height: style.height,
+            padding: style.padding,
+            decoration: _boxDecoration(style),
+            child: flexWidget,
+          ),
+          style)
     ];
   }
 
-  void _collectInlineSpans(LayoutNode node, List<pw.InlineSpan> spans) {
-    if (node.display == Display.none) return;
+  // ---------------------------------------------------------------------------
+  // Tables
+  // ---------------------------------------------------------------------------
 
-    // Handle checkbox inputs as inline widgets
-    if (node.tagName == 'input' && node.attributes['type'] == 'checkbox') {
-      // Add space before checkbox if needed
-      if (spans.isNotEmpty) {
-        final lastSpan = spans.last;
-        if (lastSpan is pw.TextSpan) {
-          final lastText = lastSpan.text ?? '';
-          if (lastText.isNotEmpty && !lastText.endsWith(' ')) {
-            spans.add(const pw.TextSpan(text: ' '));
+  Future<List<pw.Widget>> _buildTable(LayoutNode node) async {
+    final rowNodes = <LayoutNode>[];
+    final headerRows = <LayoutNode>{};
+    final captions = <LayoutNode>[];
+    for (final child in node.children) {
+      if (child.display == Display.none) continue;
+      if (child.tagName == 'tr') {
+        rowNodes.add(child);
+      } else if (child.tagName == 'caption') {
+        captions.add(child);
+      } else if (child.tagName == 'thead' ||
+          child.tagName == 'tbody' ||
+          child.tagName == 'tfoot') {
+        for (final grandChild in child.children) {
+          if (grandChild.tagName == 'tr' &&
+              grandChild.display != Display.none) {
+            rowNodes.add(grandChild);
+            if (child.tagName == 'thead') headerRows.add(grandChild);
           }
         }
       }
-      double baseline = -3;
+    }
+    if (rowNodes.isEmpty) return const [];
 
-      if (node.style.verticalAlign != null) {
-        switch (node.style.verticalAlign!) {
-          case VerticalAlign.top:
-            baseline = 6;
-            break;
-          case VerticalAlign.bottom:
-            baseline = -2;
-            break;
-          case VerticalAlign.baseline:
-            baseline = 0;
-            break;
-          case VerticalAlign.middle:
-            break;
+    // Place cells on a grid, honouring colspan/rowspan.
+    final grid = <List<_GridCell?>>[];
+    final occupied = <int, Set<int>>{};
+    var columnCount = 0;
+    var hasSpans = false;
+    for (var r = 0; r < rowNodes.length; r++) {
+      final cells = rowNodes[r]
+          .children
+          .where((c) => c.tagName == 'td' || c.tagName == 'th')
+          .where((c) => c.display != Display.none)
+          .toList();
+      final rowCells = <_GridCell?>[];
+      var col = 0;
+      for (final cell in cells) {
+        while (occupied[r]?.contains(col) ?? false) {
+          col++;
+        }
+        final colSpan =
+            (int.tryParse(cell.attributes['colspan'] ?? '') ?? 1).clamp(1, 50);
+        final rowSpan =
+            (int.tryParse(cell.attributes['rowspan'] ?? '') ?? 1).clamp(1, 500);
+        if (colSpan > 1 || rowSpan > 1) hasSpans = true;
+        final placed = _GridCell(cell, col, colSpan);
+        while (rowCells.length < col) {
+          rowCells.add(null);
+        }
+        rowCells.add(placed);
+        for (var rr = r + 1; rr < r + rowSpan && rr < rowNodes.length; rr++) {
+          for (var cc = col; cc < col + colSpan; cc++) {
+            (occupied[rr] ??= <int>{}).add(cc);
+          }
+        }
+        col += colSpan;
+      }
+      final occupiedCols = occupied[r] ?? const <int>{};
+      final end = [col, ...occupiedCols.map((c) => c + 1)].reduce(math.max);
+      columnCount = math.max(columnCount, end);
+      grid.add(rowCells);
+    }
+    if (columnCount == 0) return const [];
+
+    // Column widths: explicit cell widths win, else weight by content.
+    final explicit = List<double?>.filled(columnCount, null);
+    final weights = List<double>.filled(columnCount, 1);
+    final fixedLayout = node.style.tableLayout == TableLayout.fixed;
+    for (final row in grid) {
+      for (final cell in row) {
+        if (cell == null) continue;
+        final w = cell.node.style.width;
+        if (cell.colSpan == 1 && w != null) {
+          explicit[cell.col] ??= w;
+        }
+        if (!fixedLayout && cell.colSpan == 1) {
+          final len = _textLength(cell.node).toDouble();
+          weights[cell.col] = math.max(
+              weights[cell.col], math.sqrt(math.max(len, 1)).clamp(1, 12));
         }
       }
+    }
+    // Span mode lays rows out with flex widths only, so explicit widths (in
+    // points) are converted into the same flex units as the content
+    // weights, assuming the table spans a typical page content width.
+    final assumedWidth = node.style.width ?? node.style.maxWidth ?? 480.0;
+    final explicitTotal =
+        explicit.whereType<double>().fold<double>(0, (a, b) => a + b);
+    var flexTotal = 0.0;
+    for (var c = 0; c < columnCount; c++) {
+      if (explicit[c] == null) flexTotal += weights[c];
+    }
+    final pointsPerFlex = flexTotal > 0
+        ? math.max(40.0, assumedWidth - explicitTotal) / flexTotal
+        : 1.0;
+    double colFlex(int c) =>
+        explicit[c] != null ? explicit[c]! / pointsPerFlex : weights[c];
 
-      spans.add(pw.WidgetSpan(
-        child: _buildCheckbox(node),
-        baseline: baseline,
-      ));
-      return;
+    final borderSide = _tableBorderSide(node);
+    final tableBorder = borderSide == null
+        ? null
+        : pw.TableBorder.all(
+            color: borderSide.color,
+            width: borderSide.width,
+            style: borderSide.style);
+
+    final cellPaddingAttr =
+        double.tryParse(node.attributes['cellpadding'] ?? '');
+
+    pw.EdgeInsets cellPadding(LayoutNode c) =>
+        c.style.padding ??
+        (c.tagName == 'th'
+            ? tagStyle.tableHeaderPadding
+            : tagStyle.tableCellPadding) ??
+        (cellPaddingAttr != null
+            ? pw.EdgeInsets.all(cellPaddingAttr * 0.75)
+            : const pw.EdgeInsets.all(5));
+
+    Future<pw.Widget> buildCell(_GridCell cell, LayoutNode row) async {
+      final c = cell.node;
+      final padding = cellPadding(c);
+      final flow = _join(await _buildFlow(c.children, c.style));
+      final content = flow.widgets.isEmpty
+          ? pw.SizedBox()
+          : flow.widgets.length == 1
+              ? flow.widgets.first
+              : pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: flow.widgets);
+
+      final hAlign = c.style.textAlign == pw.TextAlign.center
+          ? 0.0
+          : c.style.textAlign == pw.TextAlign.right
+              ? 1.0
+              : -1.0;
+      final vAlign = switch (c.style.verticalAlign ?? row.style.verticalAlign) {
+        VerticalAlign.top || VerticalAlign.baseline => -1.0,
+        VerticalAlign.bottom => 1.0,
+        _ => 0.0,
+      };
+      return pw.Container(
+        padding: padding,
+        alignment: pw.Alignment(hAlign, vAlign),
+        decoration: pw.BoxDecoration(
+          color: c.style.backgroundColor,
+          border: c.style.resolvedBorder,
+        ),
+        child: content,
+      );
     }
 
-    // If this is a text node, add its text with current style
-    if (node.text != null && node.text!.isNotEmpty) {
-      // Normalize whitespace like browsers do
-      String text = node.text!;
-      // Replace multiple whitespace with single space
-      text = text.replaceAll(RegExp(r'\s+'), ' ');
-
-      // If this is the first span, trim leading whitespace
-      if (spans.isEmpty) {
-        text = text.trimLeft();
-      }
-
-      if (text.isNotEmpty) {
-        spans.add(pw.TextSpan(
-          text: text,
-          style: _mapTextStyle(node.style),
-          annotation: node.tagName == 'a' && node.attributes.containsKey('href')
-              ? pw.AnnotationUrl(node.attributes['href']!)
-              : null,
+    final widgets = <pw.Widget>[];
+    for (final caption in captions) {
+      final flow = _join(await _buildFlow(caption.children, caption.style));
+      if (flow.widgets.isNotEmpty) {
+        widgets.add(pw.Container(
+          width: _fullWidth,
+          padding: const pw.EdgeInsets.only(bottom: 4),
+          child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.center,
+              children: flow.widgets),
         ));
       }
-      return;
     }
 
-    // For non-text inline elements (span, b, i, a, etc.), add a space before
-    // if there are already spans and the previous span doesn't end with space
-    if (spans.isNotEmpty &&
-        node.tagName != '#text' &&
-        node.children.isNotEmpty) {
-      final lastSpan = spans.last;
-      if (lastSpan is pw.TextSpan) {
-        final lastText = lastSpan.text ?? '';
-        if (lastText.isNotEmpty && !lastText.endsWith(' ')) {
-          // Add a space before this inline element
-          spans.add(pw.TextSpan(text: ' ', style: _mapTextStyle(node.style)));
+    pw.BoxDecoration? rowDecoration(LayoutNode row) =>
+        row.style.backgroundColor != null
+            ? pw.BoxDecoration(color: row.style.backgroundColor)
+            : null;
+
+    if (!hasSpans) {
+      final rows = <pw.TableRow>[];
+      for (var r = 0; r < grid.length; r++) {
+        // A table row can't break across pages: rows with very long cells
+        // are split into consecutive rows, one content chunk per cell.
+        final longRow =
+            grid[r].any((g) => g != null && _textLength(g.node) > 2000);
+        if (longRow) {
+          final parts = <List<pw.Widget>>[];
+          for (var c = 0; c < columnCount; c++) {
+            final cell = c < grid[r].length ? grid[r][c] : null;
+            parts.add(cell == null
+                ? const <pw.Widget>[]
+                : _join(await _buildFlow(cell.node.children, cell.node.style))
+                    .widgets);
+          }
+          pw.Widget chunkCell(int c, int k) {
+            final cell = c < grid[r].length ? grid[r][c] : null;
+            if (cell == null || k >= parts[c].length) return pw.SizedBox();
+            final pad = cellPadding(cell.node);
+            return pw.Container(
+              padding: pw.EdgeInsets.only(
+                left: pad.left,
+                right: pad.right,
+                top: k == 0 ? pad.top : 0,
+                bottom: k == parts[c].length - 1 ? pad.bottom : 0,
+              ),
+              color: cell.node.style.backgroundColor,
+              child: parts[c][k],
+            );
+          }
+
+          final chunks = parts.map((p) => p.length).fold<int>(1, math.max);
+          for (var k = 0; k < chunks; k++) {
+            rows.add(pw.TableRow(
+              decoration: rowDecoration(rowNodes[r]),
+              children: [for (var c = 0; c < columnCount; c++) chunkCell(c, k)],
+            ));
+          }
+          continue;
         }
+        final cells = <pw.Widget>[];
+        for (var c = 0; c < columnCount; c++) {
+          final cell = c < grid[r].length ? grid[r][c] : null;
+          cells.add(cell == null
+              ? pw.SizedBox()
+              : await buildCell(cell, rowNodes[r]));
+        }
+        rows.add(pw.TableRow(
+          repeat: headerRows.contains(rowNodes[r]),
+          decoration: rowDecoration(rowNodes[r]),
+          children: cells,
+        ));
+      }
+      final allExplicit = explicit.every((w) => w != null);
+      widgets.add(pw.Table(
+        border: tableBorder,
+        defaultVerticalAlignment: pw.TableCellVerticalAlignment.full,
+        tableWidth: allExplicit ? pw.TableWidth.min : pw.TableWidth.max,
+        columnWidths: {
+          for (var c = 0; c < columnCount; c++)
+            c: explicit[c] != null
+                ? pw.FixedColumnWidth(explicit[c]!)
+                : pw.FlexColumnWidth(weights[c]),
+        },
+        children: rows,
+      ));
+    } else {
+      // pw.Table has no cell spans: render each row as its own one-row
+      // table whose columns are the spanned groups. All row tables share
+      // the same total flex, so column edges still line up.
+      for (var r = 0; r < grid.length; r++) {
+        final cells = <pw.Widget>[];
+        final widths = <int, pw.TableColumnWidth>{};
+        var c = 0;
+        while (c < columnCount) {
+          final cell =
+              grid[r].firstWhere((g) => g?.col == c, orElse: () => null);
+          if (cell != null) {
+            var flex = 0.0;
+            for (var k = c; k < c + cell.colSpan && k < columnCount; k++) {
+              flex += colFlex(k);
+            }
+            widths[cells.length] = pw.FlexColumnWidth(flex);
+            cells.add(await buildCell(cell, rowNodes[r]));
+            c += cell.colSpan;
+          } else {
+            widths[cells.length] = pw.FlexColumnWidth(colFlex(c));
+            cells.add(pw.SizedBox());
+            c++;
+          }
+        }
+        widgets.add(pw.Table(
+          border: tableBorder,
+          defaultVerticalAlignment: pw.TableCellVerticalAlignment.full,
+          columnWidths: widths,
+          children: [
+            pw.TableRow(decoration: rowDecoration(rowNodes[r]), children: cells)
+          ],
+        ));
       }
     }
 
-    // For non-text inline elements, recurse into children
-    // and apply this element's style to them
-    for (var child in node.children) {
-      if (child.text != null && child.text!.isNotEmpty) {
-        // Text node with content - apply parent's style
-        String text = child.text!;
-        text = text.replaceAll(RegExp(r'\s+'), ' ');
-
-        // If this is the first span, trim leading whitespace
-        if (spans.isEmpty) {
-          text = text.trimLeft();
-        }
-
-        if (text.isNotEmpty) {
-          spans.add(pw.TextSpan(
-            text: text,
-            style: _mapTextStyle(node.style), // Use parent's computed style
-            annotation:
-                node.tagName == 'a' && node.attributes.containsKey('href')
-                    ? pw.AnnotationUrl(node.attributes['href']!)
-                    : null,
-          ));
-        }
-      } else {
-        // Recurse for nested elements
-        _collectInlineSpans(child, spans);
+    final style = node.style;
+    return widgets.map((w) {
+      pw.Widget out = w;
+      if (style.width != null && _rowDepth == 0) {
+        out = pw.SizedBox(width: style.width, child: out);
+        out = _alignBlock(out, style);
+      } else if (style.backgroundColor != null) {
+        out = pw.Container(color: style.backgroundColor, child: out);
       }
+      return _horizontalMargins(out, style);
+    }).toList();
+  }
+
+  /// Grid line style for a table: from its CSS border / `border` attribute,
+  /// none for `border="0"`/`border: none`, else a thin grey grid (the
+  /// historical default, which keeps Markdown tables readable).
+  pw.BorderSide? _tableBorderSide(LayoutNode node) {
+    final attr = node.attributes['border'];
+    final resolved = node.style.resolvedBorder;
+    if (resolved != null) return resolved.top;
+    final declaredNone = node.style.border != null ||
+        (attr != null && (double.tryParse(attr) ?? 1) == 0);
+    if (declaredNone) return null;
+    return const pw.BorderSide(color: PdfColors.grey600, width: 0.5);
+  }
+
+  int _textLength(LayoutNode n) {
+    var l = n.text?.trim().length ?? 0;
+    for (final c in n.children) {
+      l += _textLength(c);
     }
+    return l;
   }
+}
 
-  pw.BoxDecoration? _buildBoxDecoration(CSSStyle style) {
-    if (style.backgroundColor == null && style.border == null) return null;
+class _GridCell {
+  final LayoutNode node;
+  final int col;
+  final int colSpan;
 
-    return pw.BoxDecoration(
-      color: style.backgroundColor,
-      border: style.border,
-    );
-  }
-
-  pw.TextStyle _mapTextStyle(CSSStyle style) {
-    // If we have a fallback font, we can use it as the primary font if the style doesn't specify one.
-    // This ensures we don't accidentally fallback to Helvetica (which lacks Unicode).
-    // However, we must be careful not to override specific fonts.
-
-    // Logic: If style has font, use it. Else if we have fallback, use first fallback.
-    // Else null (default PDF font).
-
-    // Note: The previous issue was forcing fallback.first ALWAYS.
-    // Here we should only do it if we are relying on defaults?
-    // Actually, PdfGoogleFonts usually provides the fallback list.
-    // The safest way to avoid Helvetica is to set the default font in the Theme of the document,
-    // NOT here. But we can hint it here.
-
-    return pw.TextStyle(
-      color: style.color,
-      fontSize: style.fontSize,
-      fontWeight: style.fontWeight,
-      fontStyle: style.fontStyle,
-      decoration: style.textDecoration,
-      font: style.fontFamily != null ? null : null,
-      fontFallback: fontFallback,
-      lineSpacing:
-          style.lineHeight, // Add line-height support if available in CSSStyle
-      background: style.backgroundColor != null
-          ? pw.BoxDecoration(color: style.backgroundColor)
-          : null,
-    );
-  }
+  _GridCell(this.node, this.col, this.colSpan);
 }
