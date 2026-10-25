@@ -46,6 +46,18 @@ class PdfExporter implements PdfBlockMeasurer {
   /// PDF page objects in a second pass afterwards.
   final _pendingPages = <_PendingPage>[];
 
+  /// PDF page number (1-based) of each heading paragraph, in document order,
+  /// computed by a dry-run pagination pass before real rendering starts - see
+  /// [_computeHeadingPageNumbers]. Word's cached TOC page numbers reflect its
+  /// own (unknown-to-us) pagination, which never matches ours, so a `TOC`
+  /// field's cached entries are rewritten against this instead of trusting
+  /// the stale cached digits from the source document.
+  var _headingPageNumbers = <int>[];
+
+  /// Consumed left-to-right as `DocxTableOfContents.cachedContent` entries
+  /// are rendered - see [_withRecomputedPageNumber].
+  var _headingPageNumberCursor = 0;
+
   /// Creates a PDF exporter with configurable defaults.
   PdfExporter({
     this.pageWidth = 612.0,
@@ -110,6 +122,9 @@ class PdfExporter implements PdfBlockMeasurer {
     final footnotesById = <int, DocxFootnote>{
       for (final f in doc.footnotes ?? const <DocxFootnote>[]) f.footnoteId: f,
     };
+
+    _headingPageNumbers = _computeHeadingPageNumbers(sections, footnotesById);
+    _headingPageNumberCursor = 0;
 
     for (final section in sections) {
       _processSection(section, footnotesById);
@@ -183,6 +198,46 @@ class PdfExporter implements PdfBlockMeasurer {
     }
     return nodes;
   }
+
+  /// Dry-runs pagination (no rendering) across every section to learn which
+  /// PDF page number each heading paragraph lands on, in document order.
+  /// Cheap to redo: pagination is pure given [section.nodes] + the layout
+  /// config, and font embedding (the only side effect touched) is
+  /// idempotent - see [PdfFontManager.embedFont].
+  List<int> _computeHeadingPageNumbers(
+    List<_SectionData> sections,
+    Map<int, DocxFootnote> footnotesById,
+  ) {
+    final pageNumbers = <int>[];
+    var pageOffset = 0;
+    for (final section in sections) {
+      final layout = PdfLayoutEngine(
+        pageWidth: section.width,
+        pageHeight: section.height,
+        marginTop: section.marginTop,
+        marginBottom: section.marginBottom,
+        marginLeft: section.marginLeft,
+        marginRight: section.marginRight,
+        baseFontSize: fontSize.toDouble(),
+        fontManager: _fontManager,
+        footnotesById: footnotesById,
+        measurer: this,
+      );
+      final pages = layout.paginateWithFootnotes(section.nodes).pages;
+      for (var i = 0; i < pages.length; i++) {
+        for (final node in pages[i]) {
+          if (node is DocxParagraph && _isHeadingStyle(node.styleId)) {
+            pageNumbers.add(pageOffset + i + 1);
+          }
+        }
+      }
+      pageOffset += pages.length;
+    }
+    return pageNumbers;
+  }
+
+  static bool _isHeadingStyle(String? styleId) =>
+      styleId != null && RegExp(r'^Heading[1-9]$').hasMatch(styleId);
 
   void _processSection(
       _SectionData section, Map<int, DocxFootnote> footnotesById) {
@@ -426,11 +481,35 @@ class PdfExporter implements PdfBlockMeasurer {
     } else if (node is DocxTableOfContents) {
       var tocY = y;
       for (final block in node.cachedContent) {
-        tocY = _renderNode(block, builder, x, tocY, layout);
+        tocY = _renderNode(
+            _withRecomputedPageNumber(block), builder, x, tocY, layout);
       }
       return tocY;
     }
     return y;
+  }
+
+  /// If [block] is a TOC entry paragraph ending in a cached page-number run
+  /// (Word's cached field result - the literal digits it displayed before
+  /// the field was next updated), replaces those digits with the page
+  /// number the corresponding heading actually landed on in this PDF's own
+  /// pagination. Matches entries to headings positionally, in document
+  /// order, since a `TOC` field's cached lines are generated in the same
+  /// order the headings themselves appear.
+  DocxBlock _withRecomputedPageNumber(DocxBlock block) {
+    if (block is! DocxParagraph) return block;
+    final idx = block.children.lastIndexWhere(
+      (c) => c is DocxText && RegExp(r'^\d+$').hasMatch(c.content.trim()),
+    );
+    if (idx == -1 || _headingPageNumberCursor >= _headingPageNumbers.length) {
+      return block;
+    }
+    final pageNumber = _headingPageNumbers[_headingPageNumberCursor++];
+    final run = block.children[idx] as DocxText;
+    final children = List<DocxInline>.from(block.children);
+    children[idx] =
+        run.copyWith(content: run.content.replaceFirst(RegExp(r'\d+'), '$pageNumber'));
+    return block.copyWith(children: children);
   }
 
   /// Renders a drop cap with true wrap-around: the letter is drawn once at
