@@ -151,10 +151,19 @@ class BlockParser {
     return result;
   }
 
+  /// OOXML on/off element: present and not explicitly `w:val="0"/"false"/"off"`.
+  static bool _onOffElement(XmlElement? el) {
+    if (el == null) return false;
+    final val = el.getAttribute('w:val');
+    return val == null || !['0', 'false', 'off'].contains(val.toLowerCase());
+  }
+
   /// Parse a paragraph element.
   DocxParagraph parseParagraph(XmlElement xml) {
     String? pStyle;
     String? cnfStyle;
+    bool keepNext = false;
+    bool keepLines = false;
 
     // Parse paragraph properties
     final pPr = xml.getElement('w:pPr');
@@ -167,6 +176,8 @@ class BlockParser {
       if (cs != null) {
         cnfStyle = cs.getAttribute('w:val');
       }
+      keepNext = _onOffElement(pPr.getElement('w:keepNext'));
+      keepLines = _onOffElement(pPr.getElement('w:keepLines'));
     }
 
     // Resolve Style Properties
@@ -207,6 +218,8 @@ class BlockParser {
       borderRight: finalProps.borderRight,
       borderBetween: finalProps.borderBetween,
       cnfStyle: cnfStyle,
+      keepNext: keepNext,
+      keepLines: keepLines,
     );
   }
 

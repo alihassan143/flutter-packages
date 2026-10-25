@@ -106,6 +106,14 @@ class DocxParagraph extends DocxBlock {
   /// Whether to insert a page break before this paragraph.
   final bool pageBreakBefore;
 
+  /// Whether this paragraph must stay on the same page as the next one
+  /// (Word's `w:keepNext` — e.g. a heading glued to its first body line).
+  final bool keepNext;
+
+  /// Whether every line of this paragraph must stay on the same page
+  /// (Word's `w:keepLines`).
+  final bool keepLines;
+
   /// Numbering ID for list items.
   final int? numId;
 
@@ -144,6 +152,8 @@ class DocxParagraph extends DocxBlock {
     this.themeFillShade,
     this.outlineLevel,
     this.pageBreakBefore = false,
+    this.keepNext = false,
+    this.keepLines = false,
     this.numId,
     this.ilvl,
     this.cnfStyle,
@@ -317,6 +327,8 @@ class DocxParagraph extends DocxBlock {
     String? themeFillShade,
     int? outlineLevel,
     bool? pageBreakBefore,
+    bool? keepNext,
+    bool? keepLines,
     int? numId,
     int? ilvl,
     String? cnfStyle,
@@ -348,6 +360,8 @@ class DocxParagraph extends DocxBlock {
       themeFillShade: themeFillShade ?? this.themeFillShade,
       outlineLevel: outlineLevel ?? this.outlineLevel,
       pageBreakBefore: pageBreakBefore ?? this.pageBreakBefore,
+      keepNext: keepNext ?? this.keepNext,
+      keepLines: keepLines ?? this.keepLines,
       numId: numId ?? this.numId,
       ilvl: ilvl ?? this.ilvl,
       cnfStyle: cnfStyle ?? this.cnfStyle,
@@ -388,6 +402,14 @@ class DocxParagraph extends DocxBlock {
               // 2. pageBreakBefore
               if (pageBreakBefore) {
                 builder.element('w:pageBreakBefore');
+              }
+
+              // 2b. keepNext / keepLines
+              if (keepNext) {
+                builder.element('w:keepNext');
+              }
+              if (keepLines) {
+                builder.element('w:keepLines');
               }
 
               // 3. numPr

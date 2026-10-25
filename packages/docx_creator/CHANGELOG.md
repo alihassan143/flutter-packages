@@ -1,3 +1,10 @@
+## Unreleased
+
+### Fixed — PDF export pagination
+- **`w:keepNext`/`w:keepLines`** are now read from and written to `w:pPr` (previously only emitted as a style default on generated headings, never round-tripped per paragraph). `PdfLayoutEngine.paginate` honours `keepNext`: a paragraph marked `keepNext` that doesn't fit on the current page together with the block right after it is pushed, with that next block, to a fresh page instead of being split from it — unless the pair is too tall for even a clean page, in which case pagination falls back to normal splitting rather than looping.
+- **Basic widow/orphan control**: `PdfLayoutEngine` no longer leaves a single line of a paragraph alone at the bottom of a page (orphan) or carries a single line alone to the top of the next page (widow) when the rest of the paragraph fits elsewhere. Known limit: this is approximated from fragment *height* against ~1.5 line-heights (the exact line count a split produced isn't tracked), so an unusually tall single wrapped line can still slip past the guard — good enough for the common case, not a line-accurate widow/orphan implementation.
+- `keepNext`/`keepLines` are not yet enforced by `docx_file_viewer`'s paged mode, which buckets whole elements by height rather than splitting at the line level — tracked for whichever PR lands line-level pagination splitting there first.
+
 ## 1.4.0
 
 ### Fixed — PDF export accuracy

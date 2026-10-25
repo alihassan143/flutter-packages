@@ -80,7 +80,8 @@ class PdfLayoutEngine {
     var currentPage = <DocxNode>[];
     var remainingHeight = contentHeight;
 
-    for (final node in nodes) {
+    for (var i = 0; i < nodes.length; i++) {
+      final node = nodes[i];
       // Handle explicit page breaks
       if (node is DocxSectionBreakBlock) {
         if (currentPage.isNotEmpty) {
@@ -98,6 +99,22 @@ class PdfLayoutEngine {
         pages.add(currentPage);
         currentPage = [];
         remainingHeight = contentHeight;
+      }
+
+      // `w:keepNext` (e.g. a heading glued to its first body line): if this
+      // node and whatever follows it don't both fit in what's left of the
+      // page, but would fit together on a clean page, start fresh instead
+      // of splitting between them.
+      if (node is DocxParagraph &&
+          node.keepNext &&
+          currentPage.isNotEmpty &&
+          i + 1 < nodes.length) {
+        final combined = measureNode(node) + measureNode(nodes[i + 1]);
+        if (combined > remainingHeight && combined <= contentHeight) {
+          pages.add(currentPage);
+          currentPage = [];
+          remainingHeight = contentHeight;
+        }
       }
 
       final height = measureNode(node);
@@ -902,6 +919,65 @@ class PdfLayoutEngine {
   /// as a follow-up; the far more common single-page overflow case is
   /// fixed.
   List<DocxParagraph> _splitParagraph(
+      DocxParagraph paragraph, double availableHeight) {
+    return _applyWidowOrphanGuard(
+      paragraph,
+      _splitParagraphRaw(paragraph, availableHeight),
+      availableHeight,
+    );
+  }
+
+  /// Word's default widow/orphan control: don't leave exactly one line of a
+  /// multi-line paragraph alone at the bottom of this page (orphan) or
+  /// carried alone to the top of the next (widow).
+  ///
+  /// Approximated from fragment *height* against one line-height, since
+  /// [_splitParagraphRaw] (and the [measurer] it may delegate to) reports
+  /// fitted/remainder paragraphs, not line counts — "this fragment is
+  /// within 1.5 line-heights of empty" stands in for "this fragment is
+  /// exactly one line". Good enough to catch the common case; a fragment
+  /// that happens to be one long wrapped line taller than 1.5x the base
+  /// line height won't be caught.
+  List<DocxParagraph> _applyWidowOrphanGuard(
+    DocxParagraph original,
+    List<DocxParagraph> split,
+    double availableHeight,
+  ) {
+    final fitted = split.first;
+    final remainder = split.last;
+    if (fitted.children.isEmpty || remainder.children.isEmpty) return split;
+
+    final lineHeight =
+        _effectiveFontSize(original, getFontSize(original.styleId)) * 1.4;
+    final widowOrphanThreshold = lineHeight * 1.5;
+    final fittedHeight = measureParagraph(fitted);
+    final remainderHeight = measureParagraph(remainder);
+
+    final isOrphan = fittedHeight <= widowOrphanThreshold &&
+        remainderHeight > widowOrphanThreshold;
+    final isWidow = remainderHeight <= widowOrphanThreshold &&
+        fittedHeight > widowOrphanThreshold;
+
+    if (isWidow) {
+      // Pull one more line back from `fitted` into `remainder` by giving
+      // the split one less line-height of room to work with.
+      final shrunk = availableHeight - lineHeight;
+      if (shrunk > 0) {
+        final retried = _splitParagraphRaw(original, shrunk);
+        if (retried.first.children.isNotEmpty) return retried;
+      }
+    }
+
+    if (isOrphan && measureParagraph(original) <= contentHeight) {
+      // Whole paragraph fits on a clean page - push it there instead of
+      // leaving a single orphaned line on this one.
+      return [_createParagraph(original, []), original];
+    }
+
+    return split;
+  }
+
+  List<DocxParagraph> _splitParagraphRaw(
       DocxParagraph paragraph, double availableHeight) {
     final m = measurer;
     if (m != null) {
