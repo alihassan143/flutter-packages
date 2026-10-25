@@ -30,9 +30,9 @@ void main() {
         home: Scaffold(body: widget),
       ));
 
-      final richTextFinder = find.byType(RichText);
+      final richTextFinder = find.byType(DocxParagraphRenderWidget);
       expect(richTextFinder, findsOneWidget);
-      final richText = tester.widget<RichText>(richTextFinder);
+      final richText = tester.widget<DocxParagraphRenderWidget>(richTextFinder);
       final span = richText.text as TextSpan;
 
       // Found span structure might be nested.
@@ -74,8 +74,8 @@ void main() {
         home: Scaffold(body: widget),
       ));
 
-      final richTextFinder = find.byType(RichText);
-      final richText = tester.widget<RichText>(richTextFinder);
+      final richTextFinder = find.byType(DocxParagraphRenderWidget);
+      final richText = tester.widget<DocxParagraphRenderWidget>(richTextFinder);
       final span = richText.text as TextSpan;
 
       Color? effectiveColor;
@@ -103,8 +103,8 @@ void main() {
         home: Scaffold(body: widget),
       ));
 
-      final richTextFinder = find.byType(RichText);
-      final richText = tester.widget<RichText>(richTextFinder);
+      final richTextFinder = find.byType(DocxParagraphRenderWidget);
+      final richText = tester.widget<DocxParagraphRenderWidget>(richTextFinder);
       final span = richText.text as TextSpan;
 
       Color? effectiveColor;

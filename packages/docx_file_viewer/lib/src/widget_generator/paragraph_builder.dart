@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../docx_view_config.dart';
 import '../theme/docx_view_theme.dart';
 
+import '../rendering/docx_paragraph_render_widget.dart';
 import '../utils/docx_units.dart';
 import '../widgets/drop_cap_text.dart';
 
@@ -195,8 +196,24 @@ class ParagraphBuilder {
       } else {
         // Standard text layout for efficiency if no floats
         if (config.enableSelection) {
+          // OS-level text selection stays on SelectableText.rich for now -
+          // the custom render object below doesn't do its own selection UI
+          // yet (an editor built on it will manage selection itself rather
+          // than wanting the OS's), so migrating this path is future work.
           rowWidget = SelectableText.rich(
             fullTextSpan,
+            textAlign: textAlign,
+          );
+        } else if (!_containsWidgetSpan(fullTextSpan)) {
+          // The custom RenderDocxParagraph core (see lib/src/rendering/):
+          // one render object, one hit-testing API, under our control -
+          // instead of RichText/RenderParagraph here. Only safe for spans
+          // with no WidgetSpan child (inline image/shape/math, or the
+          // first-line-indent spacer) - RenderDocxParagraph is a true leaf
+          // with no child render objects; a row containing one of those
+          // still falls back to RichText just below.
+          rowWidget = DocxParagraphRenderWidget(
+            text: fullTextSpan,
             textAlign: textAlign,
           );
         } else {
@@ -1294,4 +1311,18 @@ class ParagraphBuilder {
       await launchUrl(uri);
     }
   }
+}
+
+/// True if [span] or any descendant is a [WidgetSpan] - the case
+/// [DocxParagraphRenderWidget]'s leaf render object can't handle.
+bool _containsWidgetSpan(InlineSpan span) {
+  if (span is WidgetSpan) return true;
+  if (span is TextSpan) {
+    final children = span.children;
+    if (children == null) return false;
+    for (final child in children) {
+      if (_containsWidgetSpan(child)) return true;
+    }
+  }
+  return false;
 }
