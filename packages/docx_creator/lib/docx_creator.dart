@@ -21,6 +21,7 @@ export 'src/ast/docx_footnote.dart';
 export 'src/ast/docx_image.dart';
 export 'src/ast/docx_inline.dart';
 export 'src/ast/docx_list.dart';
+export 'src/ast/docx_math.dart';
 // AST
 export 'src/ast/docx_node.dart';
 export 'src/ast/docx_section.dart';
