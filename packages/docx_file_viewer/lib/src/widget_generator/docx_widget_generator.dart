@@ -5,6 +5,7 @@ import '../docx_view_config.dart';
 import '../search/docx_search_controller.dart';
 import '../theme/docx_view_theme.dart';
 import '../utils/block_index_counter.dart';
+import '../widgets/docx_node_bound.dart';
 import 'image_builder.dart';
 import 'list_builder.dart';
 import 'paragraph_builder.dart';
@@ -277,30 +278,23 @@ class DocxWidgetGenerator {
     }).toList();
   }
 
-  /// Estimate the height of a document element for pagination.
+  /// Height of a document element for pagination.
+  ///
+  /// Text-bearing elements (paragraphs, lists, table cells) are measured
+  /// with [TextPainter] using the exact same [InlineSpan]s and text style
+  /// the widget itself paints - not a fixed-line-height guess. The old
+  /// guess ignored font size/weight entirely, so a 24pt heading and a 9pt
+  /// footnote counted as the same height and pages broke in the wrong
+  /// place. Shapes and drop caps keep a flat estimate - rare enough, and
+  /// genuinely hard to size without laying them out, that it isn't worth
+  /// chasing here.
   double _estimateElementHeight(DocxNode element, double pageWidth) {
-    const lineHeight = 24.0; // Approximate line height
-    const paragraphSpacing = 16.0;
-
     if (element is DocxParagraph) {
-      // Estimate based on text content
-      int totalChars = 0;
-      for (var child in element.children) {
-        if (child is DocxText) {
-          totalChars += child.content.length;
-        }
-      }
-      // Estimate characters per line based on page width
-      final charsPerLine = ((pageWidth - 96) / 8).floor(); // ~8px per char
-      final lines = (totalChars / charsPerLine).ceil().clamp(1, 100);
-      return (lines * lineHeight) + paragraphSpacing;
+      return _measureParagraphHeight(element, pageWidth);
     } else if (element is DocxTable) {
-      // Simple row-based estimate - more accurate for most tables
-      final rowCount = element.rows.length;
-      return (rowCount * 30.0) + 16.0; // ~30px per row + margins
+      return _measureTableHeight(element, pageWidth);
     } else if (element is DocxList) {
-      // Estimate based on item count
-      return element.items.length * 30.0 + 10.0;
+      return _measureListHeight(element, pageWidth);
     } else if (element is DocxImage) {
       // Use actual dimensions if available
       final height = element.height > 0 ? element.height.toDouble() : 200.0;
@@ -311,7 +305,114 @@ class DocxWidgetGenerator {
       return 80.0; // Drop cap height
     }
 
-    return lineHeight + paragraphSpacing; // Default
+    return (theme.defaultTextStyle.fontSize ?? 16.0) * 1.5; // Default
+  }
+
+  /// Real paragraph height: builds the same spans [ParagraphBuilder] paints
+  /// and lays them out with [TextPainter], then adds the same twips-derived
+  /// padding `_buildNativeParagraph` wraps them in - see that method for why
+  /// each constant below mirrors it line for line.
+  double _measureParagraphHeight(DocxParagraph paragraph, double maxWidth) {
+    const twipsToPixels = 1 / 15.0;
+    double leftPadding = ((paragraph.indentLeft ?? 0) * twipsToPixels)
+        .clamp(0, double.infinity);
+    if ((paragraph.indentFirstLine ?? 0) < 0) {
+      final hangingPx = ((-paragraph.indentFirstLine!) * twipsToPixels)
+          .clamp(0.0, leftPadding);
+      leftPadding = (leftPadding - hangingPx).clamp(0.0, double.infinity);
+    }
+    final rightPadding = ((paragraph.indentRight ?? 0) * twipsToPixels)
+        .clamp(0, double.infinity);
+    var topPadding = ((paragraph.spacingBefore ?? 80) * twipsToPixels)
+        .clamp(0, double.infinity);
+    var bottomPadding = ((paragraph.spacingAfter ?? 80) * twipsToPixels)
+        .clamp(0, double.infinity);
+
+    if (paragraph.children.isNotEmpty) {
+      final first = paragraph.children.first;
+      if (first is DocxText &&
+          first.fontSize != null &&
+          first.fontSize! >= 20) {
+        topPadding = topPadding.clamp(16, double.infinity);
+        bottomPadding = bottomPadding.clamp(8, double.infinity);
+      }
+    }
+
+    if (paragraph.children.isEmpty) {
+      return topPadding + bottomPadding + (theme.defaultTextStyle.fontSize ?? 16.0) * 1.2;
+    }
+
+    final spans = _paragraphBuilder.buildInlineSpans(
+      paragraph.children,
+      lineHeight: _paragraphBuilder.resolveLineHeightScale(paragraph),
+    );
+    final textWidth =
+        (maxWidth - leftPadding - rightPadding).clamp(1.0, double.infinity);
+
+    final painter = TextPainter(
+      text: TextSpan(style: theme.defaultTextStyle, children: spans),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: textWidth);
+
+    return painter.height + topPadding + bottomPadding;
+  }
+
+  /// Real list height: each item's text is measured the same way
+  /// [ListBuilder] lays it out (bullet/number indent per level, 2px
+  /// top/bottom padding) instead of a flat 30px/item guess.
+  double _measureListHeight(DocxList list, double maxWidth) {
+    const markerWidth = 20.0;
+    var total = 10.0; // breathing room, mirrors the old flat constant
+    for (final item in list.items) {
+      final level = item.level.clamp(0, 8);
+      final style = item.overrideStyle ?? list.style;
+      final indentPerLevel = style.indentPerLevel / 15.0;
+      final indent = 16.0 + (level * indentPerLevel.clamp(16.0, 48.0));
+      final textWidth =
+          (maxWidth - indent - markerWidth).clamp(1.0, double.infinity);
+
+      final painter = TextPainter(
+        text: TextSpan(
+          style: theme.defaultTextStyle,
+          children: _paragraphBuilder.buildInlineSpans(item.children),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: textWidth);
+
+      total += painter.height + 4.0; // top:2 + bottom:2 padding
+    }
+    return total;
+  }
+
+  /// Table height: sums each row's height, where a row's height is the
+  /// tallest of its cells and a cell's height is its content measured the
+  /// same way as any other block (recursing into this same estimator, so a
+  /// paragraph/list/nested table inside a cell gets real measurement too).
+  /// Column widths are split evenly across a row's cells (or taken from an
+  /// explicit [DocxTableCell.width] when set) - exact grid layout (colSpan-
+  /// aware column widths) is a table-layout feature, not a pagination
+  /// estimate's job; even an even split beats the old flat 30px/row, which
+  /// ignored cell content entirely.
+  double _measureTableHeight(DocxTable table, double maxWidth) {
+    var total = 16.0;
+    for (final row in table.rows) {
+      if (row.cells.isEmpty) continue;
+      final evenWidth = maxWidth / row.cells.length;
+      double rowHeight = 0;
+      for (final cell in row.cells) {
+        final cellWidth = cell.width != null && cell.width! > 0
+            ? (cell.width! / 15.0).clamp(1.0, maxWidth)
+            : evenWidth;
+        final contentWidth = (cellWidth - 16.0).clamp(1.0, double.infinity);
+        var cellHeight = 8.0; // cell padding
+        for (final block in cell.children) {
+          cellHeight += _estimateElementHeight(block, contentWidth);
+        }
+        if (cellHeight > rowHeight) rowHeight = cellHeight;
+      }
+      total += rowHeight;
+    }
+    return total;
   }
 
   Widget _buildNoteWidget(int id, List<DocxNode> content) {
@@ -645,7 +746,16 @@ class DocxWidgetGenerator {
   }
 
   /// Generate a single widget from a [DocxNode].
+  ///
+  /// The result is wrapped in [DocxNodeBound] so an editor layer built on
+  /// top of this viewer can recover which [DocxNode] produced any given
+  /// widget - see that class for why.
   Widget? generateWidget(DocxNode node, {BlockIndexCounter? counter}) {
+    final built = _generateWidgetUnbound(node, counter: counter);
+    return built == null ? null : DocxNodeBound(node: node, child: built);
+  }
+
+  Widget? _generateWidgetUnbound(DocxNode node, {BlockIndexCounter? counter}) {
     try {
       if (node is DocxParagraph) {
         return _paragraphBuilder.build(node, counter: counter);
