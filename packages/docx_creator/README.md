@@ -58,7 +58,7 @@ A **developer-first DOCX generation library** for Dart. Create, parse, read, and
 | Tables: cell shading, margins (all four sides), vertical alignment, conditional formatting | ✅ | ✅ shading, margins and vertical alignment; cnfStyle not visually distinct in PDF |
 | Tables: nested tables/lists inside cells | ✅ | ✅ |
 | Tables spanning multiple pages | N/A (Word reflows natively) | ✅ splits by row automatically; header rows repeat on every page and are never left alone at the bottom of one |
-| Images: inline & floating, wrapping, alignment | ✅ | ✅ (floating-specific wrap/z-order collapses to normal inline flow in PDF) |
+| Images: inline & floating, wrapping, alignment | ✅ | ✅ square/tight wrap (the first floating, left/right-aligned image per paragraph flows text in a narrower column beside it); center-aligned floats and `topAndBottom`/`none`/`behindText`/`inFrontOfText` wraps, plus floats inside table cells, collapse to normal inline flow |
 | Image formats | PNG/JPEG/GIF/BMP as provided | ✅ PNG/GIF/BMP/etc. decoded & re-embedded as JPEG; JPEG passthrough |
 | Image borders | ✅ | ✅ drawn for both block-level and inline images |
 | Text using non-Latin scripts (Cyrillic, Greek, Vietnamese, etc.) without a custom font | ✅ | ✅ auto-embeds a bundled fallback font (DejaVu Sans) the first time it's needed; CJK/Arabic still need an explicit `addFont()` |
@@ -260,6 +260,7 @@ An explicit `addFont()` call always takes priority over the fallback. CJK and Ar
 | Tables spanning multiple pages                     | ✅ auto-splits by row, repeats header rows |
 | Long words/URLs wider than the line                | ✅ split across lines |
 | Images (PNG/JPEG/GIF/BMP), alignment               | ✅      |
+| Floating images with square/tight text wrap        | ✅ left/right-aligned, first per paragraph |
 | Inline images inside paragraph text                | ✅      |
 | Image borders                                        | ✅      |
 | Hyperlinks (clickable)                              | ✅      |

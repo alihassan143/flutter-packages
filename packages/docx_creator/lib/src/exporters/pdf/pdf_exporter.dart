@@ -1048,12 +1048,20 @@ class PdfExporter implements PdfBlockMeasurer {
       }
     }
 
+    final floatImage =
+        _findFloatImage(paragraph.children, textWidth, fontSize, register);
+
     var words = _collectWords(paragraph.children, fontSize,
-        forceBold: isHeading, register: register);
-    words = _splitOverlongWords(
-        words, textWidth - math.max(0, firstLine), fontSize);
-    final lines =
-        _flowLines(words, (i) => i == 0 ? textWidth - firstLine : textWidth);
+        forceBold: isHeading, register: register, skipIndex: floatImage?.index);
+    final flowWidth = floatImage != null
+        ? floatImage.image.narrowWidth
+        : textWidth - math.max(0, firstLine);
+    words = _splitOverlongWords(words, flowWidth, fontSize);
+    final lines = _flowLines(
+        words,
+        floatImage != null
+            ? (i) => i < floatImage.image.lines ? flowWidth : textWidth
+            : (i) => i == 0 ? textWidth - firstLine : textWidth);
     for (final line in lines) {
       _measureLine(line, fontSize, paragraph);
     }
@@ -1071,7 +1079,61 @@ class PdfExporter implements PdfBlockMeasurer {
       indentLeft: indentLeft,
       firstLineIndent: firstLine,
       textWidth: textWidth,
+      floatImage: floatImage?.image,
     );
+  }
+
+  /// Finds the first direct-child [DocxInlineImage] that floats with
+  /// square/tight wrap and a left/right alignment, and computes the
+  /// narrower width its wrapped lines flow through.
+  ///
+  /// Known limits (documented, not bugs): only the first such image per
+  /// paragraph is honored; `center`-aligned floats and `topAndBottom`/
+  /// `none`/`behindText`/`inFrontOfText` wraps fall back to today's
+  /// behavior (the image flows inline, no text wrap) - PDF has no native
+  /// float primitive, so wrapping is hand-flowed the same way
+  /// [_renderDropCap] hand-flows text beside a drop cap letter.
+  ({int index, _FloatImage image})? _findFloatImage(List<DocxInline> children,
+      double textWidth, double fontSize, bool register) {
+    for (var i = 0; i < children.length; i++) {
+      final child = children[i];
+      if (child is! DocxInlineImage) continue;
+      if (child.positionMode != DocxDrawingPosition.floating) continue;
+      if (child.textWrap != DocxTextWrap.square &&
+          child.textWrap != DocxTextWrap.tight) {
+        continue;
+      }
+      final isLeft = switch (child.hAlign) {
+        DrawingHAlign.left || DrawingHAlign.inside => true,
+        DrawingHAlign.right || DrawingHAlign.outside => false,
+        _ => null, // center, or unset: not enough info to pick a side.
+      };
+      if (isLeft == null) continue;
+
+      final gap = (isLeft ? child.distR : child.distL) / 12700.0;
+      final narrowWidth =
+          (textWidth - child.width - gap).clamp(0.0, textWidth);
+      if (narrowWidth <= 0) continue; // Image fills the line; wrap is moot.
+
+      final lineHeight = fontSize * 1.4;
+      final lines = (child.height / lineHeight).ceil().clamp(1, 1000);
+
+      final word = _inlineImageWord(child, register, i, 0);
+      return (
+        index: i,
+        image: _FloatImage(
+          isLeft: isLeft,
+          width: child.width,
+          height: child.height,
+          gap: gap,
+          lines: lines,
+          narrowWidth: narrowWidth,
+          imageXObjectName: word.imageXObjectName,
+          border: word.imageBorder,
+        ),
+      );
+    }
+    return null;
   }
 
   /// Draws a laid-out paragraph whose box's top-left is at ([x], [yTop]);
@@ -1080,7 +1142,7 @@ class PdfExporter implements PdfBlockMeasurer {
       _ParaLayout pl, PdfContentBuilder builder, double x, double yTop) {
     final paragraph = pl.paragraph;
     final boxTop = yTop - pl.spaceBefore;
-    final boxHeight = pl.padTop + pl.linesHeight + pl.padBottom;
+    final boxHeight = pl.padTop + pl.linesHeight + pl._floatExtra + pl.padBottom;
     final boxLeft = x + pl.indentLeft;
     final boxWidth = pl.textWidth + pl.padLeft + pl.padRight;
 
@@ -1116,12 +1178,18 @@ class PdfExporter implements PdfBlockMeasurer {
       drawSide(paragraph.borderRight, boxRight, boxTop, boxRight, boxBottom);
     }
 
+    final fi = pl.floatImage;
     final decorations = <_TextDecoration>[];
     var lineTop = boxTop - pl.padTop;
     for (var i = 0; i < pl.lines.length; i++) {
       final line = pl.lines[i];
       if (line.words.isNotEmpty) {
-        final first = i == 0 ? pl.firstLineIndent : 0.0;
+        final besideFloat = fi != null && i < fi.lines;
+        final first = besideFloat
+            ? (fi.isLeft ? fi.width + fi.gap : 0.0)
+            : (i == 0 ? pl.firstLineIndent : 0.0);
+        final lineMaxWidth =
+            besideFloat ? fi.narrowWidth : pl.textWidth - first;
         // Justified text leaves the paragraph's last line and lines ended
         // by a hard break ragged, like Word.
         final isLast = i == pl.lines.length - 1 || pl.lines[i + 1].afterBreak;
@@ -1129,7 +1197,7 @@ class PdfExporter implements PdfBlockMeasurer {
           builder: builder,
           line: line,
           startX: boxLeft + pl.padLeft + first,
-          lineMaxWidth: pl.textWidth - first,
+          lineMaxWidth: lineMaxWidth,
           y: lineTop - line.baseline,
           align: paragraph.align,
           justify: paragraph.align == DocxAlign.justify && !isLast,
@@ -1139,6 +1207,15 @@ class PdfExporter implements PdfBlockMeasurer {
       lineTop -= line.height;
     }
     _strokeDecorations(builder, decorations);
+
+    if (fi != null && fi.imageXObjectName != null) {
+      final imgX = fi.isLeft
+          ? boxLeft + pl.padLeft
+          : boxLeft + pl.padLeft + pl.textWidth - fi.width;
+      final imgY = (boxTop - pl.padTop) - fi.height;
+      builder.drawImage(fi.imageXObjectName!, imgX, imgY, fi.width, fi.height);
+      _drawImageBorder(builder, fi.border, imgX, imgY, fi.width, fi.height);
+    }
 
     return boxTop - boxHeight - pl.spaceAfter;
   }
@@ -1458,7 +1535,7 @@ class PdfExporter implements PdfBlockMeasurer {
   /// kept on one line, and runs of several spaces (code, DOCX text) keep
   /// their width instead of collapsing to one.
   List<_Word> _collectWords(List<DocxInline> children, double fontSize,
-      {bool forceBold = false, bool register = false}) {
+      {bool forceBold = false, bool register = false, int? skipIndex}) {
     final words = <_Word>[];
     var pendingGap = 0.0; // whitespace seen since the last word
     var pendingSpaces = 0;
@@ -1472,6 +1549,11 @@ class PdfExporter implements PdfBlockMeasurer {
     }
 
     for (var i = 0; i < children.length; i++) {
+      // A floating image pulled out by _layoutParagraph to wrap text beside
+      // it (see _FloatImage) is drawn separately - skip it here so its
+      // index keeps lining up with [children] for splitParagraph's
+      // srcIndex-based split, instead of being removed from the list.
+      if (i == skipIndex) continue;
       final child = children[i];
       if (child is DocxText) {
         final isBold = child.isBold || forceBold;
@@ -2794,6 +2876,32 @@ class _Line {
 enum _ParaKind { body, cell, listItem }
 
 /// A paragraph laid out into lines, with all box metrics in points.
+/// A floating image (`positionMode: floating`, square/tight wrap) pulled out
+/// of a paragraph's normal word flow so the lines it spans can be laid out
+/// at a narrower width beside it, Word-style - see
+/// [PdfExporter._layoutParagraph].
+class _FloatImage {
+  final bool isLeft;
+  final double width;
+  final double height;
+  final double gap;
+  final int lines;
+  final double narrowWidth;
+  final String? imageXObjectName;
+  final DocxBorderSide? border;
+
+  _FloatImage({
+    required this.isLeft,
+    required this.width,
+    required this.height,
+    required this.gap,
+    required this.lines,
+    required this.narrowWidth,
+    required this.imageXObjectName,
+    required this.border,
+  });
+}
+
 class _ParaLayout {
   final DocxParagraph paragraph;
   final double fontSize;
@@ -2807,6 +2915,7 @@ class _ParaLayout {
   final double indentLeft;
   final double firstLineIndent;
   final double textWidth;
+  final _FloatImage? floatImage;
 
   _ParaLayout({
     required this.paragraph,
@@ -2821,12 +2930,24 @@ class _ParaLayout {
     required this.indentLeft,
     required this.firstLineIndent,
     required this.textWidth,
+    this.floatImage,
   });
 
   double get linesHeight => lines.fold<double>(0, (sum, l) => sum + l.height);
 
+  /// Extra height to reserve when the floated image is taller than the
+  /// lines beside it, so later content can't overlap it.
+  double get _floatExtra {
+    final fi = floatImage;
+    if (fi == null) return 0;
+    final besideHeight = lines
+        .take(fi.lines)
+        .fold<double>(0, (sum, l) => sum + l.height);
+    return math.max(0, fi.height - besideHeight);
+  }
+
   double get height =>
-      spaceBefore + padTop + linesHeight + padBottom + spaceAfter;
+      spaceBefore + padTop + linesHeight + _floatExtra + padBottom + spaceAfter;
 }
 
 class _ListItemLayout {
