@@ -126,7 +126,7 @@ class ParagraphBuilder {
     List<DocxInline> currentRightFloats = [];
     List<DocxInline> currentInlines = [];
 
-    final lineHeightScale = _resolveLineHeightScale(paragraph);
+    final lineHeightScale = resolveLineHeightScale(paragraph);
     final textAlign = _convertAlign(paragraph.align);
 
     // Track current text offset for highlighting
@@ -577,6 +577,11 @@ class ParagraphBuilder {
         spans.add(_buildFootnoteRef(inline));
       } else if (inline is DocxEndnoteRef) {
         spans.add(_buildEndnoteRef(inline));
+      } else if (inline is DocxMath) {
+        spans.add(WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: _buildMathWidget(inline),
+        ));
       }
     }
 
@@ -982,7 +987,7 @@ class ParagraphBuilder {
   /// - `'auto'` (default): `lineSpacing / 240` where 240 twips = one standard line.
   /// - `'exact'`: lineSpacing is an absolute height; normalised against the same baseline.
   /// - `'atLeast'`: minimum spacing — clamped to ≥ 1.0 so lines never collapse.
-  double? _resolveLineHeightScale(DocxParagraph paragraph) {
+  double? resolveLineHeightScale(DocxParagraph paragraph) {
     if (paragraph.lineSpacing == null) return null;
     final spacing = paragraph.lineSpacing!;
     switch (paragraph.lineRule ?? 'auto') {
@@ -1097,6 +1102,93 @@ class ParagraphBuilder {
           onEndnoteTap?.call(ref.endnoteId);
         },
     );
+  }
+
+  /// Basic-fidelity rendering of a [DocxMath] equation: each top-level node
+  /// gets real visual structure (a fraction bar, a raised superscript, a
+  /// radical sign); the content *inside* a fraction/superscript/radical is
+  /// rendered as flattened plain text rather than recursed into further
+  /// nested layout — mirrors the PDF exporter's `_drawMath` for the same
+  /// reason (see [DocxMath] class doc): a bounded "basic equation" renderer,
+  /// not a full typesetting engine.
+  Widget _buildMathWidget(DocxMath math) {
+    final style = theme.defaultTextStyle;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        for (final node in math.children) _buildMathNodeWidget(node, style),
+      ],
+    );
+  }
+
+  Widget _buildMathNodeWidget(DocxMathNode node, TextStyle style) {
+    if (node is DocxMathText) {
+      return Text(node.text, style: style);
+    } else if (node is DocxMathFraction) {
+      final partStyle = style.copyWith(
+          fontSize: (style.fontSize ?? 14) * 0.8, height: 1.1);
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(flattenNodes(node.numerator), style: partStyle),
+          Container(
+              height: 1,
+              color: style.color ?? Colors.black,
+              margin: const EdgeInsets.symmetric(vertical: 1)),
+          Text(flattenNodes(node.denominator), style: partStyle),
+        ],
+      );
+    } else if (node is DocxMathSuperscript) {
+      final supStyle = style.copyWith(
+          fontSize: (style.fontSize ?? 14) * 0.6, height: 1.1);
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(flattenNodes(node.base), style: style),
+          Transform.translate(
+            offset: Offset(0, -(style.fontSize ?? 14) * 0.3),
+            child: Text(flattenNodes(node.superscript), style: supStyle),
+          ),
+        ],
+      );
+    } else if (node is DocxMathSubscript) {
+      final subStyle = style.copyWith(
+          fontSize: (style.fontSize ?? 14) * 0.6, height: 1.1);
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Text(flattenNodes(node.base), style: style),
+          Transform.translate(
+            offset: Offset(0, (style.fontSize ?? 14) * 0.15),
+            child: Text(flattenNodes(node.subscript), style: subStyle),
+          ),
+        ],
+      );
+    } else if (node is DocxMathRadical) {
+      final degStyle =
+          style.copyWith(fontSize: (style.fontSize ?? 14) * 0.5, height: 1.1);
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (node.degree != null)
+            Text(flattenNodes(node.degree!), style: degStyle),
+          Text('√', style: style),
+          Container(
+            decoration: BoxDecoration(
+              border: Border(
+                  top: BorderSide(color: style.color ?? Colors.black)),
+            ),
+            padding: const EdgeInsets.only(left: 2),
+            child: Text(flattenNodes(node.radicand), style: style),
+          ),
+        ],
+      );
+    }
+    return const SizedBox.shrink();
   }
 
   Widget _buildInlineShape(DocxShape shape) {

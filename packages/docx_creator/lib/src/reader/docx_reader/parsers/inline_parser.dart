@@ -1,6 +1,7 @@
 import 'package:xml/xml.dart';
 
 import '../../../../docx_creator.dart';
+import 'omml_parser.dart';
 
 /// Parses inline content (runs, text, hyperlinks).
 class InlineParser {
@@ -20,6 +21,10 @@ class InlineParser {
           children.add(parseRun(child, parentStyle: parentStyle));
         } else if (child.name.local == 'hyperlink') {
           children.addAll(_parseHyperlink(child, parentStyle: parentStyle));
+        } else if (child.name.local == 'oMath' ||
+            child.name.local == 'oMathPara') {
+          final math = OmmlParser.parse(child);
+          if (math != null) children.add(math);
         } else if (['ins', 'del', 'smartTag', 'sdt']
             .contains(child.name.local)) {
           // Handle inline containers (Track Changes, Smart Tags, etc.)
