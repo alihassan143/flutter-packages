@@ -151,10 +151,19 @@ class BlockParser {
     return result;
   }
 
+  /// OOXML on/off element: present and not explicitly `w:val="0"/"false"/"off"`.
+  static bool _onOffElement(XmlElement? el) {
+    if (el == null) return false;
+    final val = el.getAttribute('w:val');
+    return val == null || !['0', 'false', 'off'].contains(val.toLowerCase());
+  }
+
   /// Parse a paragraph element.
   DocxParagraph parseParagraph(XmlElement xml) {
     String? pStyle;
     String? cnfStyle;
+    bool? directKeepNext;
+    bool? directKeepLines;
 
     // Parse paragraph properties
     final pPr = xml.getElement('w:pPr');
@@ -167,10 +176,24 @@ class BlockParser {
       if (cs != null) {
         cnfStyle = cs.getAttribute('w:val');
       }
+      // Only set when the element is actually present directly on this
+      // paragraph - absence means "inherit from style", not "off" (OOXML
+      // has no per-paragraph "force off" for these toggle-by-presence
+      // elements), so the style fallback below must still get a chance.
+      final keepNextElem = pPr.getElement('w:keepNext');
+      if (keepNextElem != null) directKeepNext = _onOffElement(keepNextElem);
+      final keepLinesElem = pPr.getElement('w:keepLines');
+      if (keepLinesElem != null) {
+        directKeepLines = _onOffElement(keepLinesElem);
+      }
     }
 
     // Resolve Style Properties
     final effectiveStyle = context.resolveStyle(pStyle ?? 'Normal');
+    // Direct paragraph-level element wins; otherwise inherit from the
+    // paragraph's style chain (e.g. Heading1 sets w:keepNext on itself).
+    final keepNext = directKeepNext ?? effectiveStyle.keepNext ?? false;
+    final keepLines = directKeepLines ?? effectiveStyle.keepLines ?? false;
 
     // Parse direct properties (override styles)
     // Extract rPr from pPr if present (paragraph mark properties which act as run defaults)
@@ -207,6 +230,8 @@ class BlockParser {
       borderRight: finalProps.borderRight,
       borderBetween: finalProps.borderBetween,
       cnfStyle: cnfStyle,
+      keepNext: keepNext,
+      keepLines: keepLines,
     );
   }
 

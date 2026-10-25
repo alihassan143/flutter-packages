@@ -33,6 +33,8 @@ class DocxStyle {
   final DocxBorderSide? borderRight;
   final DocxBorderSide? borderBetween;
   final DocxBorder? borderBottom;
+  final bool? keepNext;
+  final bool? keepLines;
 
   // Run Properties
   final DocxFontWeight? fontWeight;
@@ -85,6 +87,8 @@ class DocxStyle {
     this.borderRight,
     this.borderBetween,
     this.borderBottom,
+    this.keepNext,
+    this.keepLines,
     this.fontWeight,
     this.fontStyle,
     this.decorations = const [],
@@ -149,6 +153,8 @@ class DocxStyle {
       borderRight: pProps.borderRight ?? rProps.borderRight,
       borderBetween: pProps.borderBetween,
       borderBottom: pProps.borderBottom,
+      keepNext: pProps.keepNext,
+      keepLines: pProps.keepLines,
       // R Props (merged)
       fontWeight: rProps.fontWeight,
       fontStyle: rProps.fontStyle,
@@ -200,6 +206,8 @@ class DocxStyle {
       borderRight: other.borderRight ?? borderRight,
       borderBetween: other.borderBetween ?? borderBetween,
       borderBottom: other.borderBottom ?? borderBottom,
+      keepNext: other.keepNext ?? keepNext,
+      keepLines: other.keepLines ?? keepLines,
       // R props
       fontWeight: other.fontWeight ?? fontWeight,
       fontStyle: other.fontStyle ?? fontStyle,
@@ -253,6 +261,8 @@ class DocxStyle {
     DocxBorderSide? borderLeft;
     DocxBorderSide? borderRight;
     DocxBorderSide? borderBetween;
+    bool? keepNext;
+    bool? keepLines;
 
     // Style ID
     String? styleId;
@@ -345,6 +355,14 @@ class DocxStyle {
       borderBetween = _parseBorderSide(pBdr.getElement('w:between'));
     }
 
+    // Keep-with-next / keep-lines-together: OOXML on/off elements, only
+    // set here when present at all - absence means "inherit from basedOn",
+    // not "explicitly off" (there's no per-style way to force it off).
+    final keepNextElem = pPr.getElement('w:keepNext');
+    if (keepNextElem != null) keepNext = _onOffElement(keepNextElem);
+    final keepLinesElem = pPr.getElement('w:keepLines');
+    if (keepLinesElem != null) keepLines = _onOffElement(keepLinesElem);
+
     return DocxStyle(
       id: 'temp',
       pStyleId: styleId,
@@ -367,7 +385,16 @@ class DocxStyle {
       borderLeft: borderLeft,
       borderRight: borderRight,
       borderBetween: borderBetween,
+      keepNext: keepNext,
+      keepLines: keepLines,
     );
+  }
+
+  /// OOXML on/off element: present and not explicitly `w:val="0"/"false"/"off"`.
+  static bool _onOffElement(XmlElement? el) {
+    if (el == null) return false;
+    final val = el.getAttribute('w:val');
+    return val == null || !['0', 'false', 'off'].contains(val.toLowerCase());
   }
 
   // ============================================================
