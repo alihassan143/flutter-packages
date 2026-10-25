@@ -231,6 +231,13 @@ class DocxWidgetGenerator {
       }
     }
 
+    // ponytail: DocxParagraph.keepNext (docx_creator) isn't enforced here —
+    // this batching is whole-element/whole-batch height bucketing, not a
+    // line-level layout, so there's no clean place to "keep this paragraph
+    // with the next one" without the real split-aware pagination a
+    // companion PR is landing for paged mode. Wire a keepNext guard in once
+    // that lands; PdfLayoutEngine.paginate (docx_creator) already enforces
+    // it for PDF export.
     for (var element in doc.elements) {
       // Check for explicit page breaks
       bool isPageBreak = false;
