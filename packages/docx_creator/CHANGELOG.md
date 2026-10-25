@@ -1,3 +1,11 @@
+## Unreleased
+
+### Added — basic OMML math equation support
+- `DocxMath` AST node (a new `DocxInline`) models the common subset of Office Math Markup Language: plain text runs, fractions (`m:f`), super/subscripts (`m:sSup`/`m:sSub`) and radicals (`m:rad`).
+- DOCX read: `m:oMath`/`m:oMathPara` elements inside a run are parsed into a `DocxMath` tree. Any unrecognized construct (matrices, n-ary operators, accents, limits, ...) is flattened to its plain text rather than dropped, so content is never silently lost even where visual fidelity is basic.
+- DOCX write: `DocxMath` round-trips back out as `m:oMath`.
+- PDF export and the Flutter viewer both give each top-level node real visual structure (a fraction bar, a raised superscript, a radical sign); content *inside* a fraction/superscript/radical renders as flattened plain text rather than recursing into further nested layout — a bounded "basic equation" renderer, not a full typesetting engine. Known gaps: math italic default isn't applied, nested fractions/radicals inside a fraction/superscript render as parenthesized text, and delimiter/matrix/n-ary/accent constructs fall back to flattened text.
+
 ## 1.4.0
 
 ### Fixed — PDF export accuracy
