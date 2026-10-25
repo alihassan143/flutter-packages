@@ -46,6 +46,34 @@ class PdfExporter implements PdfBlockMeasurer {
   /// PDF page objects in a second pass afterwards.
   final _pendingPages = <_PendingPage>[];
 
+  /// PDF page number (1-based) of each heading paragraph, computed by a
+  /// dry-run pagination pass before real rendering starts - see
+  /// [_computeHeadingPageNumbers]. Word's cached TOC page numbers reflect its
+  /// own (unknown-to-us) pagination, which never matches ours, so a `TOC`
+  /// field's cached entries are rewritten against this instead of trusting
+  /// the stale cached digits from the source document.
+  ///
+  /// Keyed by the heading's own text (via [_headingTextKey]) rather than a
+  /// single document-wide position: a TOC field commonly only lists a
+  /// subset of outline levels (e.g. `TOC \o "1-3"` skips Heading4+), and a
+  /// document can contain more than one TOC field, so "the Nth heading in
+  /// the document" and "the Nth entry in this cached TOC" are not
+  /// guaranteed to be the same heading. Matching by text and consuming each
+  /// key's page numbers in document order (FIFO) keeps an omitted heading
+  /// or a second TOC from shifting every entry after it.
+  var _headingPageNumbersByText = <String, List<int>>{};
+
+  /// Normalizes heading/entry text for matching in [_headingPageNumbersByText]:
+  /// collapse internal whitespace and trim, since a TOC entry's cached text
+  /// and the live heading's text can differ in incidental whitespace only.
+  static String _headingTextKey(String text) =>
+      text.trim().replaceAll(RegExp(r'\s+'), ' ');
+
+  /// Concatenates the [DocxText] runs in [children], skipping tabs/images/
+  /// other inline kinds - used only to build a matchable key, not to render.
+  static String _plainText(List<DocxInline> children) =>
+      children.whereType<DocxText>().map((t) => t.content).join();
+
   /// Creates a PDF exporter with configurable defaults.
   PdfExporter({
     this.pageWidth = 612.0,
@@ -110,6 +138,9 @@ class PdfExporter implements PdfBlockMeasurer {
     final footnotesById = <int, DocxFootnote>{
       for (final f in doc.footnotes ?? const <DocxFootnote>[]) f.footnoteId: f,
     };
+
+    _headingPageNumbersByText =
+        _computeHeadingPageNumbers(sections, footnotesById);
 
     for (final section in sections) {
       _processSection(section, footnotesById);
@@ -183,6 +214,61 @@ class PdfExporter implements PdfBlockMeasurer {
     }
     return nodes;
   }
+
+  /// Dry-runs pagination (no rendering) across every section to learn which
+  /// PDF page number each heading paragraph lands on, in document order.
+  /// Cheap to redo: pagination is pure given [section.nodes] + the layout
+  /// config, and font embedding (the only side effect touched) is
+  /// idempotent - see [PdfFontManager.embedFont].
+  Map<String, List<int>> _computeHeadingPageNumbers(
+    List<_SectionData> sections,
+    Map<int, DocxFootnote> footnotesById,
+  ) {
+    final pageNumbers = <String, List<int>>{};
+    var pageOffset = 0;
+    // _layoutParagraph resolves a heading's font size via _layoutEngine
+    // (falling back to the base body size otherwise), so it must be set
+    // here too - not just in _processSection's real render pass - or a
+    // heading dry-run-measures at the wrong size and can land on a
+    // different page than the real render, producing a wrong TOC number.
+    final previousLayoutEngine = _layoutEngine;
+    try {
+      for (final section in sections) {
+        final layout = PdfLayoutEngine(
+          pageWidth: section.width,
+          pageHeight: section.height,
+          marginTop: section.marginTop,
+          marginBottom: section.marginBottom,
+          marginLeft: section.marginLeft,
+          marginRight: section.marginRight,
+          baseFontSize: fontSize.toDouble(),
+          fontManager: _fontManager,
+          footnotesById: footnotesById,
+          measurer: this,
+        );
+        _layoutEngine = layout;
+        final pages = layout.paginateWithFootnotes(section.nodes).pages;
+        for (var i = 0; i < pages.length; i++) {
+          for (final node in pages[i]) {
+            if (node is DocxParagraph &&
+                _isHeadingStyle(node.styleId) &&
+                !_splitContinuationFragments.contains(node)) {
+              final key = _splitFragmentOriginalHeadingKey[node] ??
+                  _headingTextKey(_plainText(node.children));
+              (pageNumbers[key] ??= <int>[]).add(pageOffset + i + 1);
+            }
+          }
+        }
+        pageOffset += pages.length;
+      }
+    } finally {
+      _layoutEngine = previousLayoutEngine;
+    }
+    return pageNumbers;
+  }
+
+  static bool _isHeadingStyle(String? styleId) =>
+      styleId != null && RegExp(r'^Heading[1-9]$').hasMatch(styleId);
 
   void _processSection(
       _SectionData section, Map<int, DocxFootnote> footnotesById) {
@@ -426,11 +512,47 @@ class PdfExporter implements PdfBlockMeasurer {
     } else if (node is DocxTableOfContents) {
       var tocY = y;
       for (final block in node.cachedContent) {
-        tocY = _renderNode(block, builder, x, tocY, layout);
+        tocY = _renderNode(
+            _withRecomputedPageNumber(block), builder, x, tocY, layout);
       }
       return tocY;
     }
     return y;
+  }
+
+  /// If [block] is a TOC entry paragraph ending in a cached page-number run
+  /// (Word's cached field result - the literal digits it displayed before
+  /// the field was next updated), replaces those digits with the page
+  /// number the corresponding heading actually landed on in this PDF's own
+  /// pagination. Matches an entry to its heading by the entry's own title
+  /// text (see [_headingPageNumbersByText]), not by position, since a TOC
+  /// field commonly covers only some outline levels and a document can
+  /// have more than one TOC field.
+  DocxBlock _withRecomputedPageNumber(DocxBlock block) {
+    if (block is! DocxParagraph) return block;
+    // Word always places the cached page number after the entry's tab
+    // leader. Requiring that adjacency (rather than just "the last
+    // digit-only run") stops a title that itself ends in a number - e.g.
+    // a heading literally titled "Appendix 2024" - from being mistaken for
+    // the page-number run and overwritten.
+    final idx = block.children.lastIndexWhere(
+      (c) => c is DocxText && RegExp(r'^\d+$').hasMatch(c.content.trim()),
+    );
+    final precededByTab = idx > 0 && block.children[idx - 1] is DocxTab;
+    if (idx == -1 || !precededByTab) {
+      return block;
+    }
+    final title = _headingTextKey(_plainText(block.children.take(idx).toList()));
+    final queue = _headingPageNumbersByText[title];
+    if (queue == null || queue.isEmpty) {
+      return block;
+    }
+    final pageNumber = queue.removeAt(0);
+    final run = block.children[idx] as DocxText;
+    final children = List<DocxInline>.from(block.children);
+    children[idx] =
+        run.copyWith(content: run.content.replaceFirst(RegExp(r'\d+'), '$pageNumber'));
+    return block.copyWith(children: children);
   }
 
   /// Renders a drop cap with true wrap-around: the letter is drawn once at
@@ -1660,6 +1782,23 @@ class PdfExporter implements PdfBlockMeasurer {
   /// The layout engine of the section currently being processed.
   PdfLayoutEngine? _layoutEngine;
 
+  /// Identity-tracks every "rest" fragment [splitParagraph] has ever handed
+  /// back (the part of a paragraph pushed onto a later page). A paragraph
+  /// split across a page boundary has its `styleId` copied onto both
+  /// fragments (so the continuation still renders at heading size etc.), so
+  /// a heading long enough to wrap across pages would otherwise be counted
+  /// twice in [_computeHeadingPageNumbers] - once per fragment. Checked by
+  /// reference, not value, since fragments differ in content.
+  final Set<DocxParagraph> _splitContinuationFragments = Set.identity();
+
+  /// Identity-maps a split heading's "fitted" fragment (the one counted in
+  /// [_computeHeadingPageNumbers]) back to the ORIGINAL, unsplit heading's
+  /// full text key. A fragment only has the words that fit on its page, so
+  /// looking it up by its own (partial) text would never match the TOC
+  /// entry's full title - see [_withRecomputedPageNumber].
+  final Map<DocxParagraph, String> _splitFragmentOriginalHeadingKey =
+      Map.identity();
+
   double get fontSize0 => fontSize.toDouble();
 
   @override
@@ -1717,13 +1856,21 @@ class PdfExporter implements PdfBlockMeasurer {
       }
     }
     if (rest.isEmpty) return [paragraph, empty];
+    final restFragment = paragraph.copyWith(
+        children: rest,
+        spacingBefore: 0,
+        indentFirstLine: 0,
+        pageBreakBefore: false);
+    _splitContinuationFragments.add(restFragment);
+    final fittedFragment = paragraph.copyWith(children: fitted, spacingAfter: 0);
+    // fittedFragment only has the words that fit on its page - record the
+    // ORIGINAL (full) heading text against it so _computeHeadingPageNumbers
+    // keys this heading by its real title, not a partial first line.
+    _splitFragmentOriginalHeadingKey[fittedFragment] =
+        _headingTextKey(_plainText(paragraph.children));
     return [
-      paragraph.copyWith(children: fitted, spacingAfter: 0),
-      paragraph.copyWith(
-          children: rest,
-          spacingBefore: 0,
-          indentFirstLine: 0,
-          pageBreakBefore: false),
+      fittedFragment,
+      restFragment,
     ];
   }
 
