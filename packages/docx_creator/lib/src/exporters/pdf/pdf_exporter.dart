@@ -791,6 +791,162 @@ class PdfExporter implements PdfBlockMeasurer {
     builder.restoreState();
   }
 
+  /// Total width needed to draw [math] at [fontSize] — see [_drawMath].
+  double _measureMathWidth(DocxMath equation, double fontSize) {
+    final fontRef = _fontManager.selectFont();
+    var width = 0.0;
+    for (final node in equation.children) {
+      width += _measureMathNodeWidth(node, fontSize, fontRef);
+    }
+    return width;
+  }
+
+  /// Box height [_drawMath] needs above the line's baseline for [math] —
+  /// used so the containing line doesn't collapse onto a fraction or a
+  /// raised superscript (mirrors how image/shape height feeds line height).
+  double _measureMathHeight(DocxMath equation, double fontSize) {
+    var height = fontSize * 1.16; // plain-text line height, as a floor
+    for (final node in equation.children) {
+      if (node is DocxMathFraction) {
+        final partSize = fontSize * 0.8;
+        height = math.max(height, partSize * 1.16 * 2 + fontSize * 0.3);
+      } else if (node is DocxMathSuperscript) {
+        height = math.max(height, fontSize * 1.16 + fontSize * 0.35);
+      } else if (node is DocxMathRadical) {
+        height = math.max(height, fontSize * 1.16 + fontSize * 0.15);
+      }
+    }
+    return height;
+  }
+
+  double _measureMathNodeWidth(
+      DocxMathNode node, double fontSize, String fontRef) {
+    if (node is DocxMathText) {
+      return _measure(node.text, fontSize, fontRef);
+    } else if (node is DocxMathFraction) {
+      final partSize = fontSize * 0.8;
+      final numW = _measure(flattenNodes(node.numerator), partSize, fontRef);
+      final denW =
+          _measure(flattenNodes(node.denominator), partSize, fontRef);
+      return math.max(numW, denW) + fontSize * 0.2;
+    } else if (node is DocxMathSuperscript) {
+      final baseW = _measure(flattenNodes(node.base), fontSize, fontRef);
+      final supW = _measure(
+          flattenNodes(node.superscript), fontSize * 0.6, fontRef);
+      return baseW + supW + fontSize * 0.05;
+    } else if (node is DocxMathSubscript) {
+      final baseW = _measure(flattenNodes(node.base), fontSize, fontRef);
+      final subW =
+          _measure(flattenNodes(node.subscript), fontSize * 0.6, fontRef);
+      return baseW + subW + fontSize * 0.05;
+    } else if (node is DocxMathRadical) {
+      final text = flattenNodes(node.radicand);
+      final degW = node.degree == null
+          ? 0.0
+          : _measure(flattenNodes(node.degree!), fontSize * 0.5, fontRef);
+      return fontSize * 0.55 +
+          degW +
+          _measure(text, fontSize, fontRef) +
+          fontSize * 0.15;
+    }
+    return 0;
+  }
+
+  /// Draws a basic-fidelity rendering of [math] at ([x], [y]), [y] being
+  /// the line's text baseline (same bottom-left convention as image/shape
+  /// words — see the draw loop in [_drawParagraph]).
+  ///
+  /// Each top-level node gets real visual structure (a fraction bar, a
+  /// raised superscript, a radical sign); the content *inside* a fraction/
+  /// superscript/radical is drawn as flattened plain text rather than
+  /// recursed into further nested layout — see [DocxMath] class doc for why.
+  /// Known gaps vs. real OMML typesetting: math italic default isn't
+  /// applied, fraction depth isn't centered on the math axis (it sits on
+  /// the baseline like the rest of the line), and nested fractions/radicals
+  /// inside a fraction/superscript render as parenthesized text.
+  void _drawMath(PdfContentBuilder builder, DocxMath equation, double x,
+      double y, double fontSize) {
+    final fontRef = _fontManager.selectFont();
+    var cursor = x;
+    for (final node in equation.children) {
+      cursor +=
+          _drawMathNode(builder, node, cursor, y, fontSize, fontRef);
+    }
+  }
+
+  /// Draws [text] as its own standalone `BT ... ET` block at ([x], [y]).
+  void _drawMathText(PdfContentBuilder builder, String text, double x,
+      double y, double size, String fontRef) {
+    builder.beginText();
+    builder.setTextMatrix(x, y);
+    builder.setFont(fontRef, size);
+    builder.setFillColorHex('000000');
+    builder.showText(text);
+    builder.endText();
+  }
+
+  /// Draws one top-level math node and returns the horizontal advance.
+  double _drawMathNode(PdfContentBuilder builder, DocxMathNode node,
+      double x, double y, double fontSize, String fontRef) {
+    if (node is DocxMathText) {
+      _drawMathText(builder, node.text, x, y, fontSize, fontRef);
+      return _measure(node.text, fontSize, fontRef);
+    } else if (node is DocxMathFraction) {
+      final partSize = fontSize * 0.8;
+      final numText = flattenNodes(node.numerator);
+      final denText = flattenNodes(node.denominator);
+      final numW = _measure(numText, partSize, fontRef);
+      final denW = _measure(denText, partSize, fontRef);
+      final width = math.max(numW, denW) + fontSize * 0.2;
+      final gap = fontSize * 0.12;
+      final barY = y + partSize * 0.25;
+      _drawMathText(builder, numText, x + (width - numW) / 2, barY + gap,
+          partSize, fontRef);
+      _drawMathText(builder, denText, x + (width - denW) / 2,
+          barY - gap - partSize * 0.8, partSize, fontRef);
+      builder.drawLine(x, barY, x + width, barY, lineWidth: fontSize * 0.04);
+      return width;
+    } else if (node is DocxMathSuperscript) {
+      final baseText = flattenNodes(node.base);
+      final supText = flattenNodes(node.superscript);
+      final baseW = _measure(baseText, fontSize, fontRef);
+      final supSize = fontSize * 0.6;
+      _drawMathText(builder, baseText, x, y, fontSize, fontRef);
+      _drawMathText(
+          builder, supText, x + baseW, y + fontSize * 0.35, supSize, fontRef);
+      return baseW + _measure(supText, supSize, fontRef) + fontSize * 0.05;
+    } else if (node is DocxMathSubscript) {
+      final baseText = flattenNodes(node.base);
+      final subText = flattenNodes(node.subscript);
+      final baseW = _measure(baseText, fontSize, fontRef);
+      final subSize = fontSize * 0.6;
+      _drawMathText(builder, baseText, x, y, fontSize, fontRef);
+      _drawMathText(
+          builder, subText, x + baseW, y - fontSize * 0.15, subSize, fontRef);
+      return baseW + _measure(subText, subSize, fontRef) + fontSize * 0.05;
+    } else if (node is DocxMathRadical) {
+      final text = flattenNodes(node.radicand);
+      final degText = node.degree == null ? '' : flattenNodes(node.degree!);
+      final degW = degText.isEmpty
+          ? 0.0
+          : _measure(degText, fontSize * 0.5, fontRef);
+      final signW = fontSize * 0.55;
+      if (degText.isNotEmpty) {
+        _drawMathText(
+            builder, degText, x, y + fontSize * 0.5, fontSize * 0.5, fontRef);
+      }
+      _drawMathText(builder, '√', x + degW, y, fontSize, fontRef);
+      final textX = x + degW + signW;
+      final textW = _measure(text, fontSize, fontRef);
+      builder.drawLine(textX, y + fontSize * 1.1, textX + textW,
+          y + fontSize * 1.1,
+          lineWidth: fontSize * 0.04);
+      _drawMathText(builder, text, textX, y, fontSize, fontRef);
+      return degW + signW + textW + fontSize * 0.15;
+    }
+    return 0;
+  }
+
   void _drawArrow(PdfContentBuilder builder, double x, double y, double w,
       double h, String direction, bool fill, bool stroke) {
     final points = <List<double>>[];
@@ -1039,6 +1195,8 @@ class PdfExporter implements PdfBlockMeasurer {
         maxMedia = math.max(maxMedia, word.imageHeight);
       } else if (word.isShape) {
         maxMedia = math.max(maxMedia, word.shape!.height);
+      } else if (word.isMath) {
+        maxMedia = math.max(maxMedia, word.mathHeight);
       } else if (!word.isTab && !word.isBreak) {
         maxFont = math.max(maxFont, word.fontSize ?? paraFontSize);
       }
@@ -1118,7 +1276,7 @@ class PdfExporter implements PdfBlockMeasurer {
     final words = line.words;
     var maxFontInLine = 0.0;
     for (final word in words) {
-      if (word.isImage || word.isShape || word.isTab) continue;
+      if (word.isImage || word.isShape || word.isMath || word.isTab) continue;
       maxFontInLine = math.max(maxFontInLine, word.fontSize ?? fontSize0);
     }
     if (maxFontInLine == 0) maxFontInLine = fontSize0;
@@ -1199,6 +1357,12 @@ class PdfExporter implements PdfBlockMeasurer {
           _drawGapSpace(builder, textX + word.width, y,
               PdfFontManager.fontRegular, maxFontInLine);
         }
+      } else if (word.isMath) {
+        _drawMath(builder, word.equation!, textX, y, maxFontInLine);
+        if (hasNext) {
+          _drawGapSpace(builder, textX + word.width, y,
+              PdfFontManager.fontRegular, maxFontInLine);
+        }
       } else if (word.isCheckbox) {
         builder.saveState();
         final checkboxFontSize = word.fontSize ?? fontSize0;
@@ -1252,7 +1416,8 @@ class PdfExporter implements PdfBlockMeasurer {
             k + 1 < words.length &&
             test(words[k + 1]) &&
             words[k + 1].color == word.color &&
-            !words[k + 1].isImage;
+            !words[k + 1].isImage &&
+            !words[k + 1].isMath;
         final thickness = math.max(0.5, effFontSize / 24);
         if (word.isUnderline) {
           decorations.add(_TextDecoration(
@@ -1431,6 +1596,11 @@ class PdfExporter implements PdfBlockMeasurer {
       } else if (child is DocxShape) {
         final gap = atLineStart() ? 0.0 : pendingGap;
         addWord(_Word.shapeWord(child, child.width, gap: gap, srcIndex: i));
+      } else if (child is DocxMath) {
+        final gap = atLineStart() ? 0.0 : pendingGap;
+        addWord(_Word.mathWord(child, _measureMathWidth(child, fontSize),
+            _measureMathHeight(child, fontSize),
+            gap: gap, srcIndex: i));
       } else if (child is DocxFootnoteRef || child is DocxEndnoteRef) {
         // The reference itself is just a small superscript number glued to
         // the preceding word; the note content is rendered separately.
@@ -1589,6 +1759,7 @@ class PdfExporter implements PdfBlockMeasurer {
           !word.isBreak &&
           !word.isImage &&
           !word.isShape &&
+          !word.isMath &&
           !word.isCheckbox &&
           word.width > maxWidth &&
           word.text.runes.length > 1;
@@ -2499,6 +2670,11 @@ class _Word {
   final bool isShape;
   final DocxShape? shape;
 
+  // Inline math equation, if this "word" is actually a DocxMath.
+  final bool isMath;
+  final DocxMath? equation;
+  final double mathHeight;
+
   /// Source position (paragraph child index and character offset in the
   /// run's text), used to split a paragraph exactly at a line boundary.
   final int srcIndex;
@@ -2535,6 +2711,9 @@ class _Word {
     this.imageBorder,
     this.isShape = false,
     this.shape,
+    this.isMath = false,
+    this.equation,
+    this.mathHeight = 0,
     this.isChildBreak = false,
   });
 
@@ -2563,6 +2742,15 @@ class _Word {
           {double gap = 0, int srcIndex = 0}) =>
       _Word('', '', '', width,
           isShape: true, shape: shape, gap: gap, srcIndex: srcIndex);
+
+  static _Word mathWord(DocxMath equation, double width, double height,
+          {double gap = 0, int srcIndex = 0}) =>
+      _Word('', '', '', width,
+          isMath: true,
+          equation: equation,
+          mathHeight: height,
+          gap: gap,
+          srcIndex: srcIndex);
 
   _Word withWidth(double newWidth) => _Word(text, fontRef, color, newWidth,
       gap: gap,

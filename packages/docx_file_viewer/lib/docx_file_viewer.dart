@@ -17,3 +17,4 @@ export 'src/search/docx_search_controller.dart';
 export 'src/theme/docx_view_theme.dart';
 export 'src/utils/block_index_counter.dart';
 export 'src/utils/docx_units.dart';
+export 'src/widgets/docx_node_bound.dart';
