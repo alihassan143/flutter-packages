@@ -2,6 +2,7 @@ import 'package:docx_creator/docx_creator.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
+import '../rendering/render_docx_paragraph.dart';
 import '../widgets/docx_node_bound.dart';
 import 'docx_paragraph_text.dart';
 import 'docx_text_position.dart';
@@ -26,7 +27,7 @@ class DocxHitTester {
   /// Returns null when: no `DocxNodeBound` ancestor is found, it doesn't
   /// wrap a [DocxParagraph], that paragraph isn't in [document.elements]
   /// (stale `document` reference), it has floating content, or no
-  /// `RenderParagraph` is found under [context] (nothing painted there, or
+  /// text-rendering render object is found under [context] (nothing painted there, or
   /// an unexpected text-rendering widget).
   static DocxTextPosition? resolve({
     required BuildContext context,
@@ -45,14 +46,18 @@ class DocxHitTester {
     final renderer = _findTextRenderer(renderObject);
     if (renderer == null) return null;
 
-    // RenderParagraph (plain RichText) and RenderEditable (SelectableText.rich
-    // — the default, since DocxViewConfig.enableSelection defaults to true)
-    // resolve a point to a TextPosition with different APIs: RenderParagraph
-    // wants a point already in its own local coordinates, RenderEditable
-    // wants the raw global point and converts internally (and also adjusts
-    // for its scroll/paint offset, which a plain globalToLocal wouldn't).
+    // RenderParagraph (plain RichText), RenderEditable (SelectableText.rich —
+    // the default, since DocxViewConfig.enableSelection defaults to true) and
+    // RenderDocxParagraph (the custom leaf from render_docx_paragraph.dart)
+    // resolve a point to a TextPosition with different APIs: RenderParagraph/
+    // RenderDocxParagraph want a point already in local coordinates,
+    // RenderEditable wants the raw global point and converts internally (and
+    // also adjusts for its scroll/paint offset, which a plain globalToLocal
+    // wouldn't).
     final TextPosition textPosition;
-    if (renderer is RenderParagraph) {
+    if (renderer is RenderDocxParagraph) {
+      textPosition = renderer.getPositionForOffset(renderer.globalToLocal(globalPosition));
+    } else if (renderer is RenderParagraph) {
       textPosition = renderer.getPositionForOffset(renderer.globalToLocal(globalPosition));
     } else if (renderer is RenderEditable) {
       textPosition = renderer.getPositionForPoint(globalPosition);
@@ -65,8 +70,11 @@ class DocxHitTester {
     // see paragraph_builder.dart) - that placeholder counts as one extra
     // character in the TextPainter's offset space, ahead of every real
     // child, so it must be subtracted to get back to the paragraph model's
-    // own offsets.
-    final hasIndentPlaceholder = (node.indentFirstLine ?? 0) > 0;
+    // own offsets. RenderDocxParagraph never carries a WidgetSpan (see its
+    // own doc comment) — a firstLine-indented paragraph always renders
+    // through the RichText/SelectableText.rich path instead, so this never
+    // applies when renderer is a RenderDocxParagraph.
+    final hasIndentPlaceholder = renderer is! RenderDocxParagraph && (node.indentFirstLine ?? 0) > 0;
     final maxOffset = paragraphTextLength(node);
     final rawOffset = textPosition.offset - (hasIndentPlaceholder ? 1 : 0);
     final offset = rawOffset < 0 ? 0 : (rawOffset > maxOffset ? maxOffset : rawOffset);
@@ -77,7 +85,7 @@ class DocxHitTester {
     RenderBox? found;
     void visit(RenderObject object) {
       if (found != null) return;
-      if (object is RenderParagraph || object is RenderEditable) {
+      if (object is RenderParagraph || object is RenderEditable || object is RenderDocxParagraph) {
         found = object as RenderBox;
         return;
       }
