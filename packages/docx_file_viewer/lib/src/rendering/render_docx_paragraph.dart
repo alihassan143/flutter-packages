@@ -18,7 +18,7 @@ import 'package:flutter/widgets.dart';
 /// indent spacer) — it is a true leaf with no child render objects. A
 /// paragraph row containing one of those still renders through the existing
 /// `RichText`/`SelectableText.rich` path; see
-/// `ParagraphBuilder._containsWidgetSpan`. Supporting [WidgetSpan] here would
+/// `containsWidgetSpan` (in `paragraph_builder.dart`). Supporting [WidgetSpan] here would
 /// mean becoming a multi-child render object with placeholder dimensions,
 /// much closer to reimplementing [RenderParagraph] itself — left for when an
 /// editor actually needs inline-widget content to carry carets/selection.

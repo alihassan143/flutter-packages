@@ -204,7 +204,7 @@ class ParagraphBuilder {
             fullTextSpan,
             textAlign: textAlign,
           );
-        } else if (!_containsWidgetSpan(fullTextSpan)) {
+        } else if (!containsWidgetSpan(fullTextSpan)) {
           // The custom RenderDocxParagraph core (see lib/src/rendering/):
           // one render object, one hit-testing API, under our control -
           // instead of RichText/RenderParagraph here. Only safe for spans
@@ -1315,13 +1315,13 @@ class ParagraphBuilder {
 
 /// True if [span] or any descendant is a [WidgetSpan] - the case
 /// [DocxParagraphRenderWidget]'s leaf render object can't handle.
-bool _containsWidgetSpan(InlineSpan span) {
+bool containsWidgetSpan(InlineSpan span) {
   if (span is WidgetSpan) return true;
   if (span is TextSpan) {
     final children = span.children;
     if (children == null) return false;
     for (final child in children) {
-      if (_containsWidgetSpan(child)) return true;
+      if (containsWidgetSpan(child)) return true;
     }
   }
   return false;

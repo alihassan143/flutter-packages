@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:docx_creator/docx_creator.dart';
 import 'package:docx_file_viewer/src/docx_view_config.dart';
+import 'package:docx_file_viewer/src/rendering/docx_paragraph_render_widget.dart';
 import 'package:docx_file_viewer/src/theme/docx_view_theme.dart';
 import 'package:docx_file_viewer/src/utils/block_index_counter.dart';
 import 'package:docx_file_viewer/src/utils/docx_units.dart';
@@ -102,9 +103,12 @@ void main() {
       ));
       await tester.pump();
 
+      // The marker now renders through DocxParagraphRenderWidget (the
+      // custom render-object core), not a plain `Text` widget.
       final markerText = tester
-          .widgetList<Text>(find.byType(Text))
-          .map((t) => t.data ?? '')
+          .widgetList<DocxParagraphRenderWidget>(
+              find.byType(DocxParagraphRenderWidget))
+          .map((w) => w.text.toPlainText())
           .firstWhere((t) => t != 'Item one', orElse: () => '');
       expect(markerText.runes.first, isNot(inInclusiveRange(0xE000, 0xF8FF)));
     });

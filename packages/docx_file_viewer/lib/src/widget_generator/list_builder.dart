@@ -134,7 +134,11 @@ class ListBuilder {
           : requestedFont ?? theme.defaultTextStyle.fontFamily,
     );
 
-    // Build marker widget
+    // Build marker widget. Unlike the content below, the marker was never
+    // selectable (always plain `Text`, regardless of `config.enableSelection`)
+    // - so it can always move to the custom render core 1:1, independent of
+    // which content path (below) ends up used.
+    const markerWidth = 24.0;
     Widget markerWidget;
     if (style.imageBulletBytes != null) {
       markerWidget = Image.memory(
@@ -158,7 +162,34 @@ class ListBuilder {
       } else {
         markerText = _getBulletMarker(level, style);
       }
-      markerWidget = Text(markerText, style: markerStyle);
+      markerWidget = DocxParagraphRenderWidget(
+        text: TextSpan(text: markerText, style: markerStyle),
+      );
+    }
+
+    final contentSpan = TextSpan(children: spans);
+    Widget content;
+    if (config.enableSelection) {
+      // OS-level text selection stays on SelectableText.rich - see the same
+      // guard/reasoning in paragraph_builder.dart's build().
+      content = SelectableText.rich(contentSpan);
+    } else if (!containsWidgetSpan(contentSpan)) {
+      // Custom RenderDocxListItem core (see lib/src/rendering/): one render
+      // object for marker + content instead of Row(SizedBox, Expanded) - see
+      // that file's doc comment. Only safe when content has no WidgetSpan
+      // child (inline image/shape/math); falls back to RichText below
+      // otherwise, same as paragraph_builder.dart's own guard.
+      return Padding(
+        key: key,
+        padding: EdgeInsets.only(left: indent, top: 2, bottom: 2),
+        child: DocxListItemRenderWidget(
+          markerWidth: markerWidth,
+          marker: markerWidget,
+          content: DocxParagraphRenderWidget(text: contentSpan),
+        ),
+      );
+    } else {
+      content = RichText(text: contentSpan);
     }
 
     return Padding(
@@ -167,15 +198,8 @@ class ListBuilder {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 24,
-            child: markerWidget,
-          ),
-          Expanded(
-            child: config.enableSelection
-                ? SelectableText.rich(TextSpan(children: spans))
-                : RichText(text: TextSpan(children: spans)),
-          ),
+          SizedBox(width: markerWidth, child: markerWidget),
+          Expanded(child: content),
         ],
       ),
     );

@@ -314,19 +314,28 @@ one real API — `getPositionForOffset`, `getCaretRect`,
 `getBoxesForSelection` — under our control. `ParagraphBuilder` uses it for
 the default (non-selectable) plain-text case today.
 
+`lib/src/rendering/render_docx_list_item.dart` extends the same core to list
+items: `RenderDocxListItem` lays out a marker column (bullet/number/image)
+and a content column — reusing `RenderDocxParagraph` for each rather than
+reimplementing text layout — instead of `Row(SizedBox, Expanded)`.
+`ListBuilder` uses it under the same conditions `ParagraphBuilder` uses
+`RenderDocxParagraph`: no `WidgetSpan` in the item's content, selection off.
+
 **What's NOT on it yet** — these keep rendering through the existing
 Flutter-widget composition, and are the natural next steps:
-- Any paragraph row containing a `WidgetSpan` (inline image/shape/math, or a
-  first-line-indent spacer) — `RenderDocxParagraph` is a true leaf with no
-  child render objects; supporting those means becoming a multi-child render
-  object with placeholder dimensions, much closer to a full
-  `RenderParagraph` reimplementation.
+- Any paragraph/list-item row containing a `WidgetSpan` (inline image/shape/
+  math, or a first-line-indent spacer) — `RenderDocxParagraph` is a true leaf
+  with no child render objects; supporting those means becoming a
+  multi-child render object with placeholder dimensions, much closer to a
+  full `RenderParagraph` reimplementation.
 - OS-level text selection (`DocxViewConfig(enableSelection: true)`, the
-  default) still uses `SelectableText.rich` — an editor built on
-  `RenderDocxParagraph` will want to manage its own caret/selection rather
-  than the OS's, so migrating this path is deferred until that's needed.
-- Tables, lists, images, floating layouts, and drop caps — all still
-  Flutter-widget composition.
+  default) still uses `SelectableText.rich` — an editor built on this core
+  will want to manage its own caret/selection rather than the OS's, so
+  migrating this path is deferred until that's needed.
+- Tables, images, floating layouts, and drop caps — all still Flutter-widget
+  composition. (Nested list levels and lists inside table cells route
+  through the same `_buildListItem`, so they already get the render-object
+  path when eligible — no separate work needed there.)
 
 ## 🔍 Search API
 
