@@ -162,8 +162,8 @@ class BlockParser {
   DocxParagraph parseParagraph(XmlElement xml) {
     String? pStyle;
     String? cnfStyle;
-    bool keepNext = false;
-    bool keepLines = false;
+    bool? directKeepNext;
+    bool? directKeepLines;
 
     // Parse paragraph properties
     final pPr = xml.getElement('w:pPr');
@@ -176,12 +176,24 @@ class BlockParser {
       if (cs != null) {
         cnfStyle = cs.getAttribute('w:val');
       }
-      keepNext = _onOffElement(pPr.getElement('w:keepNext'));
-      keepLines = _onOffElement(pPr.getElement('w:keepLines'));
+      // Only set when the element is actually present directly on this
+      // paragraph - absence means "inherit from style", not "off" (OOXML
+      // has no per-paragraph "force off" for these toggle-by-presence
+      // elements), so the style fallback below must still get a chance.
+      final keepNextElem = pPr.getElement('w:keepNext');
+      if (keepNextElem != null) directKeepNext = _onOffElement(keepNextElem);
+      final keepLinesElem = pPr.getElement('w:keepLines');
+      if (keepLinesElem != null) {
+        directKeepLines = _onOffElement(keepLinesElem);
+      }
     }
 
     // Resolve Style Properties
     final effectiveStyle = context.resolveStyle(pStyle ?? 'Normal');
+    // Direct paragraph-level element wins; otherwise inherit from the
+    // paragraph's style chain (e.g. Heading1 sets w:keepNext on itself).
+    final keepNext = directKeepNext ?? effectiveStyle.keepNext ?? false;
+    final keepLines = directKeepLines ?? effectiveStyle.keepLines ?? false;
 
     // Parse direct properties (override styles)
     // Extract rPr from pPr if present (paragraph mark properties which act as run defaults)

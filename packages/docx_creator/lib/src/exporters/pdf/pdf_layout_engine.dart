@@ -101,19 +101,39 @@ class PdfLayoutEngine {
         remainingHeight = contentHeight;
       }
 
-      // `w:keepNext` (e.g. a heading glued to its first body line): if this
-      // node and whatever follows it don't both fit in what's left of the
-      // page, but would fit together on a clean page, start fresh instead
-      // of splitting between them.
+      // `w:keepNext` (e.g. a heading glued to its first body line): walk
+      // the full chain of consecutive keepNext paragraphs starting here -
+      // OOXML lets keepNext chain across any number of paragraphs, so a
+      // pairwise look at just the next node can still split a 3+ paragraph
+      // group. Stop the chain at an explicit break (pageBreakBefore /
+      // section break): that successor already starts its own fresh page,
+      // so dragging it into this group would just strand this node alone
+      // on the page in between instead of fixing anything.
       if (node is DocxParagraph &&
           node.keepNext &&
           currentPage.isNotEmpty &&
           i + 1 < nodes.length) {
-        final combined = measureNode(node) + measureNode(nodes[i + 1]);
-        if (combined > remainingHeight && combined <= contentHeight) {
-          pages.add(currentPage);
-          currentPage = [];
-          remainingHeight = contentHeight;
+        var chainEnd = i;
+        while (chainEnd < nodes.length &&
+            nodes[chainEnd] is DocxParagraph &&
+            (nodes[chainEnd] as DocxParagraph).keepNext) {
+          final next = chainEnd + 1;
+          if (next >= nodes.length) break;
+          final successor = nodes[next];
+          if (successor is DocxSectionBreakBlock) break;
+          if (successor is DocxParagraph && successor.pageBreakBefore) break;
+          chainEnd = next;
+        }
+        if (chainEnd > i) {
+          var combined = 0.0;
+          for (var j = i; j <= chainEnd; j++) {
+            combined += measureNode(nodes[j]);
+          }
+          if (combined > remainingHeight && combined <= contentHeight) {
+            pages.add(currentPage);
+            currentPage = [];
+            remainingHeight = contentHeight;
+          }
         }
       }
 
@@ -372,8 +392,19 @@ class PdfLayoutEngine {
           return;
         }
         // Doesn't fit once its footnotes are reserved — bump the last node
-        // to the next page and retry.
+        // to the next page and retry. If that node's predecessor has
+        // `keepNext` (wants to stay glued to what we just bumped), bump it
+        // too - otherwise it's left alone on this page despite the keep
+        // group's placement decision made earlier in `paginate`.
         carryOver.insert(0, candidate.removeLast());
+        while (candidate.isNotEmpty) {
+          final last = candidate.last;
+          if (last is DocxParagraph && last.keepNext) {
+            carryOver.insert(0, candidate.removeLast());
+          } else {
+            break;
+          }
+        }
       }
     }
 
