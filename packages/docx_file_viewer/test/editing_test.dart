@@ -400,5 +400,40 @@ void main() {
       expect(position, isNotNull);
       expect(position!.offset, 1);
     });
+
+    testWidgets(
+        'resolves a tap against a paragraph rendered through RenderDocxParagraph',
+        (tester) async {
+      // enableSelection: false + no WidgetSpan routes ParagraphBuilder to
+      // DocxParagraphRenderWidget (RenderDocxParagraph) instead of
+      // RichText/SelectableText.rich - see paragraph_builder.dart.
+      final generator = DocxWidgetGenerator(
+          config: const DocxViewConfig(enableSelection: false));
+      final paragraph = DocxParagraph(children: [DocxText('Hello World')]);
+      final doc = _doc([paragraph]);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: generator.generateWidget(paragraph)!,
+        ),
+      ));
+
+      final textFinder = find.descendant(
+        of: find.byType(DocxNodeBound),
+        matching: find.byType(DocxParagraphRenderWidget),
+      );
+      expect(textFinder, findsOneWidget);
+      final context = tester.element(textFinder);
+      final topLeft = tester.getTopLeft(textFinder);
+      final position = DocxHitTester.resolve(
+        context: context,
+        globalPosition: topLeft + const Offset(1, 1),
+        document: doc,
+      );
+
+      expect(position, isNotNull);
+      expect(position!.elementIndex, 0);
+      expect(position.offset, 0);
+    });
   });
 }
