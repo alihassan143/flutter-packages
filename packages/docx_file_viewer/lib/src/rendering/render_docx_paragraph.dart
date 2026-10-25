@@ -26,6 +26,9 @@ import 'package:flutter/widgets.dart';
 /// [RenderParagraph.assembleSemanticsNode] does per-span — the whole
 /// paragraph reads as one block of text. Worth revisiting once an editor
 /// needs per-span semantics (e.g. announcing "link" for a hyperlink run).
+///
+/// Also used (with no children) as [RenderDocxListItem]'s marker/content
+/// columns — see that class.
 class RenderDocxParagraph extends RenderBox
     with
         ContainerRenderObjectMixin<RenderBox, TextParentData>,

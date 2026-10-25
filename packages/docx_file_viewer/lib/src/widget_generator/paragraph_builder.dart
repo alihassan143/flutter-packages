@@ -1306,3 +1306,20 @@ class ParagraphBuilder {
     }
   }
 }
+
+/// True if [span] or any descendant is a [WidgetSpan]. No longer needed by
+/// this file's own build() (DocxParagraphRenderWidget now handles WidgetSpan
+/// children directly, see render_docx_paragraph.dart) - kept for
+/// list_builder.dart's RenderDocxListItem eligibility guard, which hasn't
+/// migrated WidgetSpan-bearing list items to the custom render core yet.
+bool containsWidgetSpan(InlineSpan span) {
+  if (span is WidgetSpan) return true;
+  if (span is TextSpan) {
+    final children = span.children;
+    if (children == null) return false;
+    for (final child in children) {
+      if (containsWidgetSpan(child)) return true;
+    }
+  }
+  return false;
+}

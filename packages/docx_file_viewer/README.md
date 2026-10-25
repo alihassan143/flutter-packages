@@ -320,15 +320,31 @@ each `WidgetSpan`'s child with `WidgetSpan.extractFromInlineSpan` (also what
 `RichText` uses), so this isn't a parallel reimplementation of that
 machinery, just the same building blocks under our own render object.
 
+`lib/src/rendering/render_docx_list_item.dart` extends the same core to list
+items: `RenderDocxListItem` lays out a marker column (bullet/number/image)
+and a content column — reusing `RenderDocxParagraph` for each rather than
+reimplementing text layout — instead of `Row(SizedBox, Expanded)`.
+`ListBuilder` uses it under the same conditions `ParagraphBuilder` uses
+`RenderDocxParagraph`: no `WidgetSpan` in the item's content, selection off.
+
 **What's NOT on it yet** — these keep rendering through the existing
 Flutter-widget composition, and are the natural next steps:
+- A list item's content row containing a `WidgetSpan` (inline image/shape/
+  math) still falls back to `Row(SizedBox, Expanded)` — `RenderDocxParagraph`
+  itself handles `WidgetSpan` children now (see above), but
+  `ListBuilder`/`RenderDocxListItem` hasn't been updated to pass them
+  through yet; `containsWidgetSpan` still gates that path off for list
+  items specifically.
 - OS-level text selection (`DocxViewConfig(enableSelection: true)`, the
-  default) still uses `SelectableText.rich` — an editor built on
-  `RenderDocxParagraph` will want to manage its own caret/selection rather
-  than the OS's, so migrating this path is deferred until that's needed.
-- Tables, lists, floating layouts, and drop caps — all still Flutter-widget
+  default) still uses `SelectableText.rich` — an editor built on this core
+  will want to manage its own caret/selection rather than the OS's, so
+  migrating this path is deferred until that's needed.
+- Tables, images, floating layouts, and drop caps — all still Flutter-widget
   composition (floats/drop-caps also still draw their own images directly
-  rather than going through a paragraph row at all).
+  rather than going through a paragraph row at all). Nested list levels and
+  lists inside table cells route through the same `_buildListItem`, so they
+  already get the render-object path when eligible — no separate work
+  needed there.
 
 ## 🔍 Search API
 

@@ -1,6 +1,7 @@
 import 'package:docx_creator/docx_creator.dart';
 
 import 'package:docx_file_viewer/src/docx_view_config.dart';
+import 'package:docx_file_viewer/src/rendering/docx_paragraph_render_widget.dart';
 import 'package:docx_file_viewer/src/theme/docx_view_theme.dart';
 import 'package:docx_file_viewer/src/widget_generator/list_builder.dart';
 import 'package:docx_file_viewer/src/widget_generator/paragraph_builder.dart';
@@ -108,16 +109,24 @@ void main() {
         home: Scaffold(body: widget),
       ));
 
-      final richTexts = tester.widgetList<RichText>(find.byType(RichText));
+      // The marker now renders through DocxParagraphRenderWidget (the
+      // custom render-object core), not a plain `Text`/`RichText` - check
+      // both that and any remaining RichText (the content path).
+      final spans = [
+        ...tester
+            .widgetList<RichText>(find.byType(RichText))
+            .map((rt) => rt.text),
+        ...tester
+            .widgetList<DocxParagraphRenderWidget>(
+                find.byType(DocxParagraphRenderWidget))
+            .map((w) => w.text),
+      ];
 
       bool foundGreen = false;
-      for (var rt in richTexts) {
-        if (rt.text is TextSpan) {
-          final span = rt.text as TextSpan;
-          if (span.style?.color == const Color(0xFF00FF00)) {
-            foundGreen = true;
-            break;
-          }
+      for (var span in spans) {
+        if (span is TextSpan && span.style?.color == const Color(0xFF00FF00)) {
+          foundGreen = true;
+          break;
         }
       }
       expect(foundGreen, isTrue);
