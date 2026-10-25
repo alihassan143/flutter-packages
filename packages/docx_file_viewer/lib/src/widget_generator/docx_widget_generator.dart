@@ -246,6 +246,40 @@ class DocxWidgetGenerator {
         if (element is! DocxSectionBreakBlock) {
           currentBatch.add(element);
         }
+      } else if ((element is DocxParagraph ||
+              element is DocxList ||
+              element is DocxTable) &&
+          _estimateElementHeight(element, pageWidth) > availableHeight) {
+        // Taller than a whole page on its own - flow it across as many
+        // pages as it needs instead of letting it overflow one page's
+        // Container. Bypasses the batch/flat-estimate machinery below:
+        // each chunk's height comes from the splitter itself, which
+        // measures the exact text it kept.
+        flushBatch();
+        DocxNode? remaining = element;
+        while (remaining != null) {
+          if (currentPageHeight >= availableHeight &&
+              currentPageContent.isNotEmpty) {
+            startNewPage();
+          }
+          final spaceLeft =
+              (availableHeight - currentPageHeight).clamp(0.0, availableHeight);
+          final split = _splitElementToFit(remaining, spaceLeft, pageWidth);
+          if (split.fitted == null) {
+            // Nothing fits even on an empty page (e.g. one line/row/item
+            // taller than a page) - place it whole rather than loop
+            // forever; it overflows its container same as before this change.
+            currentPageContent
+                .addAll(_generateBlockWidgets([remaining], counter: counter));
+            currentPageHeight = availableHeight;
+            break;
+          }
+          currentPageContent.addAll(
+              _generateBlockWidgets([split.fitted!], counter: counter));
+          currentPageHeight += split.fittedHeight;
+          remaining = split.remainder;
+          if (remaining != null) startNewPage();
+        }
       } else {
         currentBatch.add(element);
 
@@ -413,6 +447,197 @@ class DocxWidgetGenerator {
       total += rowHeight;
     }
     return total;
+  }
+
+  /// Splits [node] so that as much of it as fits in [maxHeight] is returned
+  /// as `fitted` (with its real measured height in `fittedHeight`) and
+  /// whatever's left as `remainder` (`null` once nothing is left). Only
+  /// paragraphs/lists/tables are splittable; anything else comes back
+  /// whole as `remainder` with `fitted: null`.
+  ({DocxNode? fitted, DocxNode? remainder, double fittedHeight})
+      _splitElementToFit(DocxNode node, double maxHeight, double pageWidth) {
+    if (node is DocxParagraph) {
+      final r = _splitParagraphToFit(node, maxHeight, pageWidth);
+      return (fitted: r.fitted, remainder: r.remainder, fittedHeight: r.fittedHeight);
+    } else if (node is DocxList) {
+      final r = _splitListToFit(node, maxHeight, pageWidth);
+      return (fitted: r.fitted, remainder: r.remainder, fittedHeight: r.fittedHeight);
+    } else if (node is DocxTable) {
+      final r = _splitTableToFit(node, maxHeight, pageWidth);
+      return (fitted: r.fitted, remainder: r.remainder, fittedHeight: r.fittedHeight);
+    }
+    return (fitted: null, remainder: node, fittedHeight: 0);
+  }
+
+  /// Real height of [children] laid out at [width], using the exact spans
+  /// [ParagraphBuilder] paints - shared by paragraph and list-item splitting
+  /// below so both measure the same way.
+  double _measureInlineHeight(List<DocxInline> children, double width) {
+    final painter = TextPainter(
+      text: TextSpan(
+        style: theme.defaultTextStyle,
+        children: _paragraphBuilder.buildInlineSpans(children),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: width > 0 ? width : 1.0);
+    return painter.height;
+  }
+
+  /// Splits [paragraph] at a word boundary (binary-searching each run's
+  /// word count against real [TextPainter] height) so the fitted part
+  /// actually measures within [maxHeight] instead of guessing a line count.
+  /// Non-text inlines (images, breaks, refs) are kept atomic.
+  ({DocxParagraph? fitted, DocxParagraph? remainder, double fittedHeight})
+      _splitParagraphToFit(
+          DocxParagraph paragraph, double maxHeight, double pageWidth) {
+    final textWidth = (pageWidth - 96).clamp(1.0, double.infinity);
+    final fittedChildren = <DocxInline>[];
+
+    for (var i = 0; i < paragraph.children.length; i++) {
+      final child = paragraph.children[i];
+      if (child is DocxText) {
+        final words = child.content.split(' ');
+        var lo = 0, hi = words.length, best = 0;
+        while (lo <= hi) {
+          final mid = (lo + hi) >> 1;
+          final prefix = words.take(mid).join(' ');
+          final candidate = [
+            ...fittedChildren,
+            if (prefix.isNotEmpty) child.copyWith(content: prefix),
+          ];
+          final h = _measureInlineHeight(candidate, textWidth);
+          if (h <= maxHeight) {
+            best = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        if (best == words.length) {
+          fittedChildren.add(child);
+          continue;
+        }
+        if (best == 0) {
+          final remainderChildren = paragraph.children.sublist(i);
+          return (
+            fitted: fittedChildren.isEmpty
+                ? null
+                : paragraph.copyWith(children: fittedChildren),
+            remainder: paragraph.copyWith(children: remainderChildren),
+            fittedHeight: fittedChildren.isEmpty
+                ? 0
+                : _measureInlineHeight(fittedChildren, textWidth),
+          );
+        }
+        final prefix = words.take(best).join(' ');
+        final suffix = words.skip(best).join(' ');
+        fittedChildren.add(child.copyWith(content: prefix));
+        final remainderChildren = [
+          child.copyWith(content: suffix),
+          ...paragraph.children.sublist(i + 1),
+        ];
+        return (
+          fitted: paragraph.copyWith(children: fittedChildren),
+          remainder: paragraph.copyWith(children: remainderChildren),
+          fittedHeight: _measureInlineHeight(fittedChildren, textWidth),
+        );
+      } else {
+        final candidate = [...fittedChildren, child];
+        if (_measureInlineHeight(candidate, textWidth) <= maxHeight) {
+          fittedChildren.add(child);
+          continue;
+        }
+        final remainderChildren = paragraph.children.sublist(i);
+        return (
+          fitted: fittedChildren.isEmpty
+              ? null
+              : paragraph.copyWith(children: fittedChildren),
+          remainder: paragraph.copyWith(children: remainderChildren),
+          fittedHeight: fittedChildren.isEmpty
+              ? 0
+              : _measureInlineHeight(fittedChildren, textWidth),
+        );
+      }
+    }
+    return (
+      fitted: paragraph,
+      remainder: null,
+      fittedHeight: _measureInlineHeight(fittedChildren, textWidth),
+    );
+  }
+
+  /// Splits [list] between items (never mid-item).
+  ({DocxList? fitted, DocxList? remainder, double fittedHeight})
+      _splitListToFit(DocxList list, double maxHeight, double pageWidth) {
+    final textWidth = (pageWidth - 96).clamp(1.0, double.infinity);
+    final fittedItems = <DocxListItem>[];
+    double used = 10.0; // breathing room, mirrors _estimateElementHeight's flat constant
+
+    for (var i = 0; i < list.items.length; i++) {
+      final item = list.items[i];
+      final itemHeight = _measureInlineHeight(item.children, textWidth) + 4.0;
+      if (used + itemHeight > maxHeight && fittedItems.isNotEmpty) {
+        return (
+          fitted: list.copyWith(items: fittedItems),
+          remainder: list.copyWith(items: list.items.sublist(i)),
+          fittedHeight: used,
+        );
+      }
+      fittedItems.add(item);
+      used += itemHeight;
+    }
+    return (fitted: list, remainder: null, fittedHeight: used);
+  }
+
+  /// Height of one table row: the tallest of its cells' content, each
+  /// measured by recursing into [_estimateElementHeight] - same approach
+  /// that method already uses for a whole table, just scoped to one row
+  /// so rows can be compared against the space actually left on a page.
+  double _measureRowHeight(DocxTableRow row, double pageWidth) {
+    if (row.cells.isEmpty) return 30.0;
+    final cellWidth = pageWidth / row.cells.length;
+    var rowHeight = 0.0;
+    for (final cell in row.cells) {
+      var cellHeight = 8.0;
+      for (final block in cell.children) {
+        cellHeight += _estimateElementHeight(block, cellWidth);
+      }
+      if (cellHeight > rowHeight) rowHeight = cellHeight;
+    }
+    return rowHeight;
+  }
+
+  /// Splits [table] between rows (never mid-row, matching DOCX's
+  /// `cantSplit` row semantics). Repeats a `w:tblHeader` row at the top of
+  /// the continuation, same as Word does.
+  ({DocxTable? fitted, DocxTable? remainder, double fittedHeight})
+      _splitTableToFit(DocxTable table, double maxHeight, double pageWidth) {
+    final fittedRows = <DocxTableRow>[];
+    var used = 16.0; // base margin, mirrors _estimateElementHeight's table constant
+
+    for (var i = 0; i < table.rows.length; i++) {
+      final row = table.rows[i];
+      final rowHeight = _measureRowHeight(row, pageWidth);
+      if (used + rowHeight > maxHeight && fittedRows.isNotEmpty) {
+        final remainderRows = table.rows.sublist(i);
+        final headerRow =
+            table.rows.isNotEmpty && table.rows.first.isHeader
+                ? table.rows.first
+                : null;
+        final continuationRows =
+            headerRow != null && !remainderRows.first.isHeader
+                ? [headerRow, ...remainderRows]
+                : remainderRows;
+        return (
+          fitted: table.copyWith(rows: fittedRows),
+          remainder: table.copyWith(rows: continuationRows),
+          fittedHeight: used,
+        );
+      }
+      fittedRows.add(row);
+      used += rowHeight;
+    }
+    return (fitted: table, remainder: null, fittedHeight: used);
   }
 
   Widget _buildNoteWidget(int id, List<DocxNode> content) {
