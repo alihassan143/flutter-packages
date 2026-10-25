@@ -1,0 +1,8 @@
+# Tests tagged `network` hit live external URLs and are excluded from the
+# default `dart test` run - they're slow (one has a 3-minute timeout) and
+# their runtime depends on network conditions, not this codebase, which
+# makes them a bad fit for a suite CI expects to be fast and deterministic.
+# Run them explicitly with: dart test --run-skipped --tags=network
+tags:
+  network:
+    skip: "hits live network URLs - run explicitly with: dart test --run-skipped --tags=network"
