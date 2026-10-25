@@ -1,3 +1,8 @@
+## Unreleased
+
+### Fixed — PDF export accuracy
+- **TOC page numbers now match the PDF's own pagination**: a `DocxTableOfContents`'s cached entries carry whatever page numbers Word last computed for its own layout, which never match this library's pagination. `PdfExporter` now dry-runs pagination once per section to learn which page each heading actually lands on, then rewrites each cached TOC line's trailing page-number digits against that instead of carrying Word's stale numbers through verbatim.
+
 ## 1.4.0
 
 ### Fixed — PDF export accuracy

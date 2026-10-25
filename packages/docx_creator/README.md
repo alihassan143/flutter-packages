@@ -72,7 +72,7 @@ A **developer-first DOCX generation library** for Dart. Create, parse, read, and
 | Drop caps | ✅ (true Word text-wrap) | ✅ true wrap-around: following text flows in a narrower column beside the letter |
 | Footnotes | ✅ | ✅ rendered at the bottom of the page; space is auto-reserved so body text can't overlap it. Font size matches body text (no automatic downscale) |
 | Endnotes | ✅ | ✅ rendered on a trailing "Endnotes" page, with a superscript reference marker at the citation point |
-| Table of Contents | ✅ (live field, recalculated by Word) | ⚠️ cached TOC content renders as static text; page numbers aren't recomputed against PDF pagination |
+| Table of Contents | ✅ (live field, recalculated by Word) | ✅ titles render as static text (no live field), but page numbers are recomputed against the PDF's own pagination, not Word's stale cache |
 | Checkboxes (☐ ☑ ☒) | ✅ | ✅ |
 | Multi-page pagination | N/A | ✅ automatic; paragraphs and tables both split cleanly across pages with no overlap; a nested list inside a table cell numbers correctly per level |
 | Long words/URLs wider than the line | N/A | ✅ split across lines like any other overflow, instead of drawing past the margin |
