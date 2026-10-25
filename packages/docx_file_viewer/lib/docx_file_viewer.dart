@@ -13,6 +13,11 @@ library;
 
 export 'src/docx_view.dart';
 export 'src/docx_view_config.dart';
+export 'src/editing/docx_edit_command_stack.dart';
+export 'src/editing/docx_edit_ops.dart';
+export 'src/editing/docx_hit_tester.dart';
+export 'src/editing/docx_paragraph_text.dart';
+export 'src/editing/docx_text_position.dart';
 export 'src/search/docx_search_controller.dart';
 export 'src/theme/docx_view_theme.dart';
 export 'src/utils/block_index_counter.dart';
