@@ -6,6 +6,7 @@ import 'package:docx_file_viewer/src/rendering/docx_paragraph_render_widget.dart
 import 'package:docx_file_viewer/src/rendering/render_docx_paragraph.dart';
 import 'package:docx_file_viewer/src/theme/docx_view_theme.dart';
 import 'package:docx_file_viewer/src/widget_generator/paragraph_builder.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -81,6 +82,105 @@ void main() {
 
       expect(boxes, isNotEmpty);
       expect(boxes.first.left, 0);
+    });
+
+    testWidgets('a tap on a recognizer span fires it', (tester) async {
+      var tapped = false;
+      final recognizer = TapGestureRecognizer()..onTap = () => tapped = true;
+      addTearDown(recognizer.dispose);
+      final span = TextSpan(children: [
+        const TextSpan(text: 'before '),
+        TextSpan(text: 'link', recognizer: recognizer),
+      ]);
+      final key = GlobalKey();
+
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: SizedBox(
+            width: 400,
+            child: DocxParagraphRenderWidget(key: key, text: span),
+          ),
+        ),
+      );
+
+      final render =
+          key.currentContext!.findRenderObject() as RenderDocxParagraph;
+      // "before link" -> offset 10 lands inside "link".
+      final caret = render.getCaretRect(const TextPosition(offset: 10));
+      final renderBox = find.byType(DocxParagraphRenderWidget);
+      await tester.tapAt(
+          tester.getTopLeft(renderBox) + Offset(caret.left + 1, 5));
+      await tester.pumpAndSettle();
+
+      expect(tapped, isTrue);
+    });
+
+    testWidgets('overflow is clipped, not left to bleed into siblings',
+        (tester) async {
+      final key = GlobalKey();
+
+      // Force a height far shorter than the laid-out text needs.
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: Center(
+            child: SizedBox(
+              width: 50,
+              height: 10,
+              child: DocxParagraphRenderWidget(
+                key: key,
+                text: const TextSpan(
+                    text: 'A long run of text that will wrap onto many '
+                        'lines inside a very narrow, very short box.'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // Must not throw during paint, and must stay sized to the box its
+      // parent gave it rather than growing to fit the overflowing text.
+      final render =
+          key.currentContext!.findRenderObject() as RenderDocxParagraph;
+      expect(render.size, const Size(50, 10));
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('exposes paragraph text to accessibility', (tester) async {
+      final handle = tester.ensureSemantics();
+      const span = TextSpan(text: 'Hello World');
+
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: SizedBox(
+            width: 400,
+            child: DocxParagraphRenderWidget(text: span),
+          ),
+        ),
+      );
+
+      expect(
+        tester.getSemantics(find.byType(DocxParagraphRenderWidget)),
+        matchesSemantics(label: 'Hello World'),
+      );
+      handle.dispose();
+    });
+
+    testWidgets('disposing the widget tree does not throw', (tester) async {
+      const span = TextSpan(text: 'Hello World');
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: SizedBox(
+            width: 400,
+            child: DocxParagraphRenderWidget(text: span),
+          ),
+        ),
+      );
+      await tester.pumpWidget(const SizedBox());
+      expect(tester.takeException(), isNull);
     });
   });
 

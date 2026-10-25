@@ -35,6 +35,12 @@ class RenderDocxParagraph extends RenderBox {
 
   final TextPainter _textPainter;
 
+  @override
+  void dispose() {
+    _textPainter.dispose();
+    super.dispose();
+  }
+
   InlineSpan get text => _textPainter.text!;
   set text(InlineSpan value) {
     if (_textPainter.text == value) return;
@@ -98,11 +104,54 @@ class RenderDocxParagraph extends RenderBox {
 
   @override
   void paint(PaintingContext context, Offset offset) {
-    _textPainter.paint(context.canvas, offset);
+    // RichText/RenderParagraph clip overflow by default; this painter
+    // doesn't unless we tell it to, so a parent constraining us below the
+    // laid-out text's size (e.g. a narrow column) would otherwise bleed
+    // into whatever's drawn next to it.
+    if (_textPainter.size.width > size.width ||
+        _textPainter.size.height > size.height) {
+      context.pushClipRect(
+        needsCompositing,
+        offset,
+        Offset.zero & size,
+        (context, offset) => _textPainter.paint(context.canvas, offset),
+      );
+    } else {
+      _textPainter.paint(context.canvas, offset);
+    }
   }
 
   @override
   bool hitTestSelf(Offset position) => true;
+
+  @override
+  void handleEvent(PointerEvent event, BoxHitTestEntry entry) {
+    // hitTestSelf claims every pointer hit on this box, so a span's own
+    // recognizer (link taps, footnote-reference taps) only fires if we
+    // dispatch to it ourselves - RenderParagraph does this internally,
+    // we're not going through it anymore.
+    if (event is! PointerDownEvent) return;
+    final position = _textPainter.getPositionForOffset(entry.localPosition);
+    final span = _textPainter.text?.getSpanForPosition(position);
+    if (span is TextSpan) span.recognizer?.addPointer(event);
+  }
+
+  // RenderParagraph reports its text to accessibility services; this leaf
+  // didn't, so a screen reader skipped every paragraph rendered through it.
+  // This restores the paragraph-level label. Known gap, same shape as the
+  // WidgetSpan limitation above: an interactive span (a link, a footnote
+  // reference) isn't exposed as its own distinguishable semantics node the
+  // way RenderParagraph's assembleSemanticsNode does per-span - the whole
+  // paragraph reads as one block of text. Worth revisiting once an editor
+  // needs per-span semantics (e.g. announcing "link" for a hyperlink run).
+  @override
+  void describeSemanticsConfiguration(SemanticsConfiguration config) {
+    super.describeSemanticsConfiguration(config);
+    config
+      ..isSemanticBoundary = true
+      ..textDirection = textDirection
+      ..label = plainText;
+  }
 
   /// Resolves a point in this render object's own coordinate space to a text
   /// position — the primitive hit-testing (tap-to-caret, tap-to-selection)
