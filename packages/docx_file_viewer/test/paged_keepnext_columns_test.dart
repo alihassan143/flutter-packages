@@ -150,4 +150,38 @@ void main() {
       expect(lastMarkerPage, greaterThan(0));
     });
   });
+
+  group('Paged mode: keepNext chains longer than a pair', () {
+    testWidgets('3 consecutive keepNext paragraphs move together, not just 2',
+        (tester) async {
+      const config = DocxViewConfig(
+          pageMode: DocxPageMode.paged, pageWidth: 300, pageHeight: 400);
+
+      for (var fillerCount = 3; fillerCount <= 10; fillerCount++) {
+        final filler = List.generate(
+            fillerCount, (i) => DocxParagraph(children: [DocxText('Filler$i')]));
+        final doc = _docWith([
+          ...filler,
+          DocxParagraph(keepNext: true, children: [DocxText('A_MARK')]),
+          DocxParagraph(keepNext: true, children: [DocxText('B_MARK')]),
+          DocxParagraph(children: [DocxText('C_MARK')]),
+        ]);
+
+        final generator = DocxWidgetGenerator(config: config);
+        final pages = generator.generateWidgets(doc);
+
+        final aPage = await _pageIndexContaining(tester, pages, 'A_MARK');
+        final bPage = await _pageIndexContaining(tester, pages, 'B_MARK');
+        final cPage = await _pageIndexContaining(tester, pages, 'C_MARK');
+
+        expect(aPage, greaterThanOrEqualTo(0),
+            reason: 'fillerCount=$fillerCount: A must render somewhere');
+        expect(bPage, aPage,
+            reason: 'fillerCount=$fillerCount: A and B landed on different pages');
+        expect(cPage, aPage,
+            reason: 'fillerCount=$fillerCount: A, B and C landed on different '
+                'pages (3-element keepNext chain split)');
+      }
+    });
+  });
 }
