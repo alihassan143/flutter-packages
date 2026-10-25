@@ -182,6 +182,97 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('a WidgetSpan child lays out inline with the surrounding text',
+        (tester) async {
+      final imageKey = GlobalKey();
+      final span = TextSpan(children: [
+        const TextSpan(text: 'before '),
+        WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: SizedBox(key: imageKey, width: 20, height: 20),
+        ),
+        const TextSpan(text: ' after'),
+      ]);
+      final key = GlobalKey();
+
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: SizedBox(
+            width: 400,
+            child: DocxParagraphRenderWidget(key: key, text: span),
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      final paragraphTopLeft = tester.getTopLeft(find.byKey(key));
+      final imageTopLeft = tester.getTopLeft(find.byKey(imageKey));
+      // The placeholder sits after "before " and before " after", so it must
+      // be offset to the right of the paragraph's own left edge, not stacked
+      // at (0, 0) the way an un-laid-out/ignored child would be.
+      expect(imageTopLeft.dx, greaterThan(paragraphTopLeft.dx));
+    });
+
+    testWidgets('a DocxMath-shaped WidgetSpan renders inline without throwing',
+        (tester) async {
+      // RenderDocxParagraph doesn't know about DocxMath - it only sees
+      // whatever widget ParagraphBuilder put inside the WidgetSpan. A plain
+      // widget standing in for the math rendering is enough to prove the
+      // render object's WidgetSpan handling is content-agnostic.
+      final span = TextSpan(children: [
+        const TextSpan(text: 'x = '),
+        WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Container(width: 30, height: 15, color: const Color(0xFF000000)),
+        ),
+      ]);
+
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: SizedBox(
+            width: 400,
+            child: DocxParagraphRenderWidget(text: span),
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(Container), findsOneWidget);
+    });
+
+    testWidgets('tapping an embedded widget span reaches it',
+        (tester) async {
+      var tapped = false;
+      final span = TextSpan(children: [
+        const TextSpan(text: 'before '),
+        WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => tapped = true,
+            child: const SizedBox(width: 24, height: 24),
+          ),
+        ),
+      ]);
+
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: SizedBox(
+            width: 400,
+            child: DocxParagraphRenderWidget(text: span),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byType(GestureDetector));
+      await tester.pumpAndSettle();
+
+      expect(tapped, isTrue);
+    });
   });
 
   group('ParagraphBuilder uses RenderDocxParagraph for plain text', () {
@@ -207,7 +298,7 @@ void main() {
     });
 
     testWidgets(
-        'a paragraph containing an inline image still falls back to RichText (WidgetSpan not supported)',
+        'a paragraph containing an inline image renders through DocxParagraphRenderWidget',
         (tester) async {
       final builder = ParagraphBuilder(
         theme: DocxViewTheme.light(),
@@ -223,10 +314,11 @@ void main() {
       final widget = builder.build(paragraph);
       await tester.pumpWidget(MaterialApp(home: Scaffold(body: widget)));
 
-      // Falls back to the existing RichText path since this render object
-      // is a leaf with no child render objects for the WidgetSpan image.
-      expect(find.byType(RichText), findsWidgets);
-      expect(find.byType(DocxParagraphRenderWidget), findsNothing);
+      // WidgetSpan children (the image) are now laid out as real render
+      // children of RenderDocxParagraph via WidgetSpan.extractFromInlineSpan
+      // - no more falling back to RichText for this case.
+      expect(find.byType(DocxParagraphRenderWidget), findsOneWidget);
+      expect(find.byType(Image), findsOneWidget);
     });
 
     testWidgets('selection mode (default) still uses SelectableText.rich',

@@ -1,10 +1,11 @@
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
-/// A leaf [RenderBox] that lays out and paints plain (non-[WidgetSpan])
-/// paragraph text directly through a [TextPainter], the same primitive
-/// [RenderParagraph] uses internally — but under our own control, with one
-/// API regardless of whether the viewer's selection mode is on or off.
+/// A [RenderBox] that lays out and paints paragraph text — including embedded
+/// [WidgetSpan] children (inline images/shapes/math, the first-line-indent
+/// spacer) — directly through a [TextPainter], the same primitive
+/// [RenderParagraph] uses internally, but under our own control with one API
+/// regardless of whether the viewer's selection mode is on or off.
 ///
 /// This is the foundation an editor needs: a single render object that can
 /// answer "what text position is under this point" ([getPositionForOffset])
@@ -13,25 +14,34 @@ import 'package:flutter/widgets.dart';
 /// `SelectableText.rich`, backed by `RenderParagraph`/`RenderEditable`
 /// respectively) with two incompatible APIs for the same question.
 ///
-/// Known limitation: unlike [RenderParagraph], this does not support
-/// [WidgetSpan] children (inline images/shapes/math, or the first-line-
-/// indent spacer) — it is a true leaf with no child render objects. A
-/// paragraph row containing one of those still renders through the existing
-/// `RichText`/`SelectableText.rich` path; see
-/// `ParagraphBuilder._containsWidgetSpan`. Supporting [WidgetSpan] here would
-/// mean becoming a multi-child render object with placeholder dimensions,
-/// much closer to reimplementing [RenderParagraph] itself — left for when an
-/// editor actually needs inline-widget content to carry carets/selection.
-class RenderDocxParagraph extends RenderBox {
+/// Inline-widget layout reuses [RenderInlineChildrenContainerDefaults] — the
+/// same mixin [RenderParagraph] itself uses for this — so there's no need to
+/// reimplement placeholder-dimension bookkeeping from scratch; see
+/// [DocxParagraphRenderWidget], which extracts each [WidgetSpan]'s child via
+/// [WidgetSpan.extractFromInlineSpan] (also what [RichText] uses) and passes
+/// them down as this render object's children.
+///
+/// Known gap: an interactive span (a link, a footnote reference) isn't
+/// exposed as its own distinguishable semantics node the way
+/// [RenderParagraph.assembleSemanticsNode] does per-span — the whole
+/// paragraph reads as one block of text. Worth revisiting once an editor
+/// needs per-span semantics (e.g. announcing "link" for a hyperlink run).
+class RenderDocxParagraph extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, TextParentData>,
+        RenderInlineChildrenContainerDefaults {
   RenderDocxParagraph({
     required InlineSpan text,
     TextAlign textAlign = TextAlign.start,
     required TextDirection textDirection,
+    List<RenderBox>? children,
   }) : _textPainter = TextPainter(
           text: text,
           textAlign: textAlign,
           textDirection: textDirection,
-        );
+        ) {
+    addAll(children);
+  }
 
   final TextPainter _textPainter;
 
@@ -62,44 +72,100 @@ class RenderDocxParagraph extends RenderBox {
     markNeedsLayout();
   }
 
-  void _layoutText(double minWidth, double maxWidth) {
+  /// Lays out every inline-widget child with `layoutChild`/`getBaseline`,
+  /// feeds the result to the [TextPainter] as placeholder dimensions (one per
+  /// [WidgetSpan], in document order — the contract
+  /// [RenderInlineChildrenContainerDefaults.layoutInlineChildren] and
+  /// [TextPainter.setPlaceholderDimensions] share), then lays out the text
+  /// itself. Every call site that triggers a [TextPainter] layout goes
+  /// through this so a paragraph with [WidgetSpan] children never lays out
+  /// text with a stale/empty placeholder list, which [TextPainter.layout]
+  /// treats as a mismatch (asserts) once any child render object exists.
+  void _setPlaceholdersAndLayoutText(
+    double minWidth,
+    double maxWidth,
+    ChildLayouter layoutChild,
+    ChildBaselineGetter getBaseline,
+  ) {
+    _textPainter.setPlaceholderDimensions(
+      layoutInlineChildren(maxWidth, layoutChild, getBaseline),
+    );
     _textPainter.layout(minWidth: minWidth, maxWidth: maxWidth);
   }
 
   @override
   double computeMinIntrinsicWidth(double height) {
-    _layoutText(0, double.infinity);
+    _setPlaceholdersAndLayoutText(
+      0,
+      double.infinity,
+      (child, constraints) =>
+          Size(child.getMinIntrinsicWidth(double.infinity), 0.0),
+      ChildLayoutHelper.getDryBaseline,
+    );
     return _textPainter.minIntrinsicWidth;
   }
 
   @override
   double computeMaxIntrinsicWidth(double height) {
-    _layoutText(0, double.infinity);
+    _setPlaceholdersAndLayoutText(
+      0,
+      double.infinity,
+      (child, constraints) =>
+          Size(child.getMaxIntrinsicWidth(double.infinity), 0.0),
+      ChildLayoutHelper.getDryBaseline,
+    );
     return _textPainter.maxIntrinsicWidth;
   }
 
   @override
   double computeMinIntrinsicHeight(double width) {
-    _layoutText(0, width);
+    _setPlaceholdersAndLayoutText(
+      0,
+      width,
+      ChildLayoutHelper.dryLayoutChild,
+      ChildLayoutHelper.getDryBaseline,
+    );
     return _textPainter.height;
   }
 
   @override
   double computeMaxIntrinsicHeight(double width) {
-    _layoutText(0, width);
+    _setPlaceholdersAndLayoutText(
+      0,
+      width,
+      ChildLayoutHelper.dryLayoutChild,
+      ChildLayoutHelper.getDryBaseline,
+    );
     return _textPainter.height;
   }
 
   @override
   double computeDistanceToActualBaseline(TextBaseline baseline) {
-    _layoutText(0, constraints.maxWidth);
+    _setPlaceholdersAndLayoutText(
+      0,
+      constraints.maxWidth,
+      ChildLayoutHelper.dryLayoutChild,
+      ChildLayoutHelper.getDryBaseline,
+    );
     return _textPainter.computeDistanceToActualBaseline(baseline);
   }
 
   @override
   void performLayout() {
-    _layoutText(constraints.minWidth, constraints.maxWidth);
+    final constraints = this.constraints;
+    _setPlaceholdersAndLayoutText(
+      constraints.minWidth,
+      constraints.maxWidth,
+      ChildLayoutHelper.layoutChild,
+      ChildLayoutHelper.getBaseline,
+    );
+    positionInlineChildren(_textPainter.inlinePlaceholderBoxes!);
     size = constraints.constrain(_textPainter.size);
+  }
+
+  @override
+  void applyPaintTransform(RenderBox child, Matrix4 transform) {
+    defaultApplyPaintTransform(child, transform);
   }
 
   @override
@@ -114,15 +180,24 @@ class RenderDocxParagraph extends RenderBox {
         needsCompositing,
         offset,
         Offset.zero & size,
-        (context, offset) => _textPainter.paint(context.canvas, offset),
+        (context, offset) {
+          _textPainter.paint(context.canvas, offset);
+          paintInlineChildren(context, offset);
+        },
       );
     } else {
       _textPainter.paint(context.canvas, offset);
+      paintInlineChildren(context, offset);
     }
   }
 
   @override
   bool hitTestSelf(Offset position) => true;
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    return hitTestInlineChildren(result, position);
+  }
 
   @override
   void handleEvent(PointerEvent event, BoxHitTestEntry entry) {
@@ -138,12 +213,7 @@ class RenderDocxParagraph extends RenderBox {
 
   // RenderParagraph reports its text to accessibility services; this leaf
   // didn't, so a screen reader skipped every paragraph rendered through it.
-  // This restores the paragraph-level label. Known gap, same shape as the
-  // WidgetSpan limitation above: an interactive span (a link, a footnote
-  // reference) isn't exposed as its own distinguishable semantics node the
-  // way RenderParagraph's assembleSemanticsNode does per-span - the whole
-  // paragraph reads as one block of text. Worth revisiting once an editor
-  // needs per-span semantics (e.g. announcing "link" for a hyperlink run).
+  // This restores the paragraph-level label.
   @override
   void describeSemanticsConfiguration(SemanticsConfiguration config) {
     super.describeSemanticsConfiguration(config);
