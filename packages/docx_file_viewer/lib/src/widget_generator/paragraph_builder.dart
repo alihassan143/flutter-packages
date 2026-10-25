@@ -204,20 +204,14 @@ class ParagraphBuilder {
             fullTextSpan,
             textAlign: textAlign,
           );
-        } else if (!containsWidgetSpan(fullTextSpan)) {
+        } else {
           // The custom RenderDocxParagraph core (see lib/src/rendering/):
           // one render object, one hit-testing API, under our control -
-          // instead of RichText/RenderParagraph here. Only safe for spans
-          // with no WidgetSpan child (inline image/shape/math, or the
-          // first-line-indent spacer) - RenderDocxParagraph is a true leaf
-          // with no child render objects; a row containing one of those
-          // still falls back to RichText just below.
+          // instead of RichText/RenderParagraph here. Handles WidgetSpan
+          // children (inline image/shape/math, the first-line-indent
+          // spacer) the same way RichText does, via
+          // WidgetSpan.extractFromInlineSpan.
           rowWidget = DocxParagraphRenderWidget(
-            text: fullTextSpan,
-            textAlign: textAlign,
-          );
-        } else {
-          rowWidget = RichText(
             text: fullTextSpan,
             textAlign: textAlign,
           );
@@ -1313,8 +1307,11 @@ class ParagraphBuilder {
   }
 }
 
-/// True if [span] or any descendant is a [WidgetSpan] - the case
-/// [DocxParagraphRenderWidget]'s leaf render object can't handle.
+/// True if [span] or any descendant is a [WidgetSpan]. No longer needed by
+/// this file's own build() (DocxParagraphRenderWidget now handles WidgetSpan
+/// children directly, see render_docx_paragraph.dart) - kept for
+/// list_builder.dart's RenderDocxListItem eligibility guard, which hasn't
+/// migrated WidgetSpan-bearing list items to the custom render core yet.
 bool containsWidgetSpan(InlineSpan span) {
   if (span is WidgetSpan) return true;
   if (span is TextSpan) {
