@@ -126,7 +126,7 @@ class ParagraphBuilder {
     List<DocxInline> currentRightFloats = [];
     List<DocxInline> currentInlines = [];
 
-    final lineHeightScale = _resolveLineHeightScale(paragraph);
+    final lineHeightScale = resolveLineHeightScale(paragraph);
     final textAlign = _convertAlign(paragraph.align);
 
     // Track current text offset for highlighting
@@ -982,7 +982,7 @@ class ParagraphBuilder {
   /// - `'auto'` (default): `lineSpacing / 240` where 240 twips = one standard line.
   /// - `'exact'`: lineSpacing is an absolute height; normalised against the same baseline.
   /// - `'atLeast'`: minimum spacing — clamped to ≥ 1.0 so lines never collapse.
-  double? _resolveLineHeightScale(DocxParagraph paragraph) {
+  double? resolveLineHeightScale(DocxParagraph paragraph) {
     if (paragraph.lineSpacing == null) return null;
     final spacing = paragraph.lineSpacing!;
     switch (paragraph.lineRule ?? 'auto') {
