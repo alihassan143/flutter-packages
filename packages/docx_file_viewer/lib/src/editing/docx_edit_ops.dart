@@ -94,6 +94,11 @@ DocxBuiltDocument deleteRange(
   if (start.offset == end.offset) return doc;
 
   final paragraph = _paragraphAt(doc, start.elementIndex);
+  final length = paragraphTextLength(paragraph);
+  if (start.offset < 0 || end.offset > length) {
+    throw RangeError('range ${start.offset}..${end.offset} is out of range '
+        'for paragraph ${start.elementIndex} (length $length)');
+  }
   if (paragraphHasFloats(paragraph)) {
     throw ArgumentError(
         'deleteRange does not support paragraphs with floating content');

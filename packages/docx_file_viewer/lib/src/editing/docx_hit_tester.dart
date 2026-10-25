@@ -60,8 +60,15 @@ class DocxHitTester {
       return null;
     }
 
+    // `ParagraphBuilder.buildInlineSpans` inserts a leading `WidgetSpan`
+    // placeholder for a paragraph's first-line indent (`w:firstLine` > 0,
+    // see paragraph_builder.dart) - that placeholder counts as one extra
+    // character in the TextPainter's offset space, ahead of every real
+    // child, so it must be subtracted to get back to the paragraph model's
+    // own offsets.
+    final hasIndentPlaceholder = (node.indentFirstLine ?? 0) > 0;
     final maxOffset = paragraphTextLength(node);
-    final rawOffset = textPosition.offset;
+    final rawOffset = textPosition.offset - (hasIndentPlaceholder ? 1 : 0);
     final offset = rawOffset < 0 ? 0 : (rawOffset > maxOffset ? maxOffset : rawOffset);
     return DocxTextPosition(elementIndex: elementIndex, offset: offset);
   }

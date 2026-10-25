@@ -69,6 +69,20 @@ void main() {
       ]);
       expect(locateInParagraph(p, 0), isNull);
     });
+
+    test('DocxMath counts as one rendered character, like other WidgetSpans',
+        () {
+      final math = DocxMath([DocxMathText('x')]);
+      final p = DocxParagraph(
+          children: [DocxText('a'), math, DocxText('b')]); // 1 + 1 + 1
+      expect(paragraphTextLength(p), 3);
+      // Offset 2 (the boundary right after the equation) resolves to "end
+      // of the equation child" per locateInParagraph's boundary convention
+      // (same as any other child boundary - see the plain-text-runs test
+      // above). Before the fix, DocxMath counted as 0 chars, so this would
+      // have resolved one child further in (into 'b') instead.
+      expect(locateInParagraph(p, 2), (childIndex: 1, offsetInChild: 1));
+    });
   });
 
   group('docx_edit_ops', () {
@@ -142,6 +156,21 @@ void main() {
       );
       final p = result.elements.single as DocxParagraph;
       expect(p.children.map((c) => (c as DocxText).content).join(), 'ab');
+    });
+
+    test('deleteRange throws for a stale position past the paragraph end',
+        () {
+      final doc = _doc([
+        DocxParagraph(children: [DocxText('Hi')]), // length 2
+      ]);
+      expect(
+        () => deleteRange(
+          doc,
+          const DocxTextPosition(elementIndex: 0, offset: 0),
+          const DocxTextPosition(elementIndex: 0, offset: 5),
+        ),
+        throwsRangeError,
+      );
     });
 
     test('splitParagraph turns one paragraph into two at the offset', () {
@@ -336,6 +365,40 @@ void main() {
       );
 
       expect(position, isNull);
+    });
+
+    testWidgets(
+        'accounts for the first-line-indent placeholder span',
+        (tester) async {
+      final generator =
+          DocxWidgetGenerator(config: const DocxViewConfig());
+      // indentFirstLine > 0 makes buildInlineSpans insert a leading
+      // WidgetSpan placeholder ahead of the real text - without subtracting
+      // it, every resolved offset would be off by one.
+      final paragraph = DocxParagraph(
+          indentFirstLine: 200, children: [DocxText('Hello World')]);
+      final doc = _doc([paragraph]);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: generator.generateWidget(paragraph)!,
+        ),
+      ));
+
+      final textFinder = textRenderFinder().first;
+      final context = tester.element(textFinder);
+      final topLeft = tester.getTopLeft(textFinder);
+      final position = DocxHitTester.resolve(
+        context: context,
+        // Lands a couple of characters into "Hello", past the indent
+        // placeholder. Without subtracting the placeholder, this would
+        // resolve one character further in (2) than it actually does (1).
+        globalPosition: topLeft + const Offset(30, 1),
+        document: doc,
+      );
+
+      expect(position, isNotNull);
+      expect(position!.offset, 1);
     });
   });
 }

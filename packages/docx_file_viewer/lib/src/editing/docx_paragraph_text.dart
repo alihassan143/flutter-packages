@@ -7,9 +7,9 @@ import 'package:docx_creator/docx_creator.dart';
 /// length, [DocxLineBreak] 1, [DocxTab] 4 (it paints as 4 literal spaces,
 /// not a real tab stop), [DocxCheckbox] 2 (glyph + space), footnote/endnote
 /// refs however many digits their id prints as, and a non-floating
-/// [DocxInlineImage]/[DocxShape] 1 - they paint as a `WidgetSpan`, which
-/// `TextPainter`/`RenderParagraph` also count as exactly one character when
-/// resolving a tap position. Floating images/shapes never reach this
+/// [DocxInlineImage]/[DocxShape]/[DocxMath] 1 - they paint as a `WidgetSpan`,
+/// which `TextPainter`/`RenderParagraph` also count as exactly one character
+/// when resolving a tap position. Floating images/shapes never reach this
 /// function (see the scope note on [locateInParagraph]).
 int inlineRenderedLength(DocxInline inline) {
   if (inline is DocxText) return inline.content.length;
@@ -18,6 +18,7 @@ int inlineRenderedLength(DocxInline inline) {
   if (inline is DocxCheckbox) return 2;
   if (inline is DocxFootnoteRef) return '${inline.footnoteId}'.length;
   if (inline is DocxEndnoteRef) return '${inline.endnoteId}'.length;
+  if (inline is DocxMath) return 1;
   if (inline is DocxInlineImage || inline is DocxShape) return 1;
   return 0;
 }
