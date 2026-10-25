@@ -112,6 +112,22 @@ class DocxSectionDef extends DocxSection {
   /// the image will be rendered on top of the color.
   final DocxBackgroundImage? backgroundImage;
 
+  /// Number of equal-width text columns (`w:cols w:num`). `1` (the default)
+  /// is normal single-column text; DOCX writers only emit `w:cols` when this
+  /// is greater than 1.
+  ///
+  /// Only equal-width columns are supported — `w:cols`' per-column `w:col`
+  /// overrides (variable widths) are not read or written.
+  final int columnCount;
+
+  /// Gap between columns, in twips (`w:cols w:space`). Ignored when
+  /// [columnCount] is `1`.
+  final int columnSpacing;
+
+  /// Whether a vertical line is drawn between columns (`w:cols w:sep`).
+  /// Ignored when [columnCount] is `1`.
+  final bool columnSeparator;
+
   const DocxSectionDef({
     this.orientation = DocxPageOrientation.portrait,
     this.pageSize = DocxPageSize.letter,
@@ -126,6 +142,9 @@ class DocxSectionDef extends DocxSection {
     this.footer,
     this.backgroundColor,
     this.backgroundImage,
+    this.columnCount = 1,
+    this.columnSpacing = kDefaultColumnSpacing,
+    this.columnSeparator = false,
     super.id,
   });
 
@@ -144,6 +163,9 @@ class DocxSectionDef extends DocxSection {
     DocxFooter? footer,
     DocxColor? backgroundColor,
     DocxBackgroundImage? backgroundImage,
+    int? columnCount,
+    int? columnSpacing,
+    bool? columnSeparator,
   }) {
     return DocxSectionDef(
       orientation: orientation ?? this.orientation,
@@ -159,8 +181,21 @@ class DocxSectionDef extends DocxSection {
       footer: footer ?? this.footer,
       backgroundColor: backgroundColor ?? this.backgroundColor,
       backgroundImage: backgroundImage ?? this.backgroundImage,
+      columnCount: columnCount ?? this.columnCount,
+      columnSpacing: columnSpacing ?? this.columnSpacing,
+      columnSeparator: columnSeparator ?? this.columnSeparator,
       id: id,
     );
+  }
+
+  /// Content width of a single column, in twips, when [columnCount] > 1
+  /// (equal-width columns sharing [effectiveWidth] minus margins and
+  /// inter-column gaps). Returns the full content width when [columnCount]
+  /// is 1.
+  int columnContentWidth(int fullContentWidth) {
+    if (columnCount <= 1) return fullContentWidth;
+    final gaps = columnSpacing * (columnCount - 1);
+    return ((fullContentWidth - gaps) / columnCount).floor();
   }
 
   int get effectiveWidth {
@@ -241,6 +276,13 @@ class DocxSectionDef extends DocxSection {
             builder.attribute('w:footer', kDefaultFooterDistance.toString());
           },
         );
+        if (columnCount > 1) {
+          builder.element('w:cols', nest: () {
+            builder.attribute('w:num', columnCount.toString());
+            builder.attribute('w:space', columnSpacing.toString());
+            if (columnSeparator) builder.attribute('w:sep', '1');
+          });
+        }
       },
     );
   }

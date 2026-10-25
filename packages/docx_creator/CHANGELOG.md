@@ -1,3 +1,11 @@
+## Unreleased
+
+### Added — basic multi-column sections (`w:cols`)
+- `DocxSectionDef` gains `columnCount`, `columnSpacing` and `columnSeparator`, read from and written to `w:cols` in `w:sectPr`. Only equal-width columns are supported — `w:cols`'s per-column `w:col` width overrides aren't read or written.
+- **PDF export**: a section with `columnCount > 1` flows body content column-by-column (filling column 1 top-to-bottom before moving to column 2, etc.), paginating across physical pages once every column is full. `PdfLayoutEngine.paginateColumns` reuses the existing single-column `paginate` against a virtual narrow "page" sized to one column's width, rather than threading a variable content width through paragraph/list/table splitting.
+- **Known gap**: a multi-column section's footnotes aren't reserved bottom-of-page space the way the single-column path's `paginateWithFootnotes` does — documented rather than silently mis-measured.
+- **docx_file_viewer**: continuous mode renders a multi-column section's body as a basic `Row` of equal-width columns, splitting its widgets into `columnCount` sequential chunks (not real content-height-balanced columns). Paged mode doesn't yet honor `columnCount` — its pagination estimate assumes one full-width column.
+
 ## 1.4.0
 
 ### Fixed — PDF export accuracy

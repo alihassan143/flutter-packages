@@ -200,6 +200,11 @@ class PdfExporter implements PdfBlockMeasurer {
     );
     _layoutEngine = layout;
 
+    if (section.columnCount > 1) {
+      _processMultiColumnSection(section, layout);
+      return;
+    }
+
     final paginationResult = layout.paginateWithFootnotes(section.nodes);
     final pages = paginationResult.pages;
 
@@ -362,6 +367,154 @@ class PdfExporter implements PdfBlockMeasurer {
     }
 
     builder.restoreState();
+  }
+
+  /// Multi-column equivalent of [_processSection]'s normal single-column
+  /// loop. Separate code path (rather than branching inside the single-
+  /// column loop) so the existing, already-tested single-column pagination
+  /// and rendering are untouched when `columnCount == 1`.
+  ///
+  /// Known gap: doesn't reserve/render footnotes (unlike the single-column
+  /// path's [PdfLayoutEngine.paginateWithFootnotes]) - see
+  /// [PdfLayoutEngine.paginateColumns].
+  void _processMultiColumnSection(
+      _SectionData section, PdfLayoutEngine layout) {
+    final physicalPages = layout.paginateColumns(
+      section.nodes,
+      columnCount: section.columnCount,
+      columnSpacing: section.columnSpacing,
+    );
+
+    // Zero-margin engine sized to one column's content width, reused across
+    // every column/page so paragraph/table wrapping matches what
+    // `paginateColumns` already split against.
+    final columnEngine = PdfLayoutEngine(
+      pageWidth:
+          layout.columnContentWidth(section.columnCount, section.columnSpacing),
+      pageHeight: layout.pageHeight,
+      marginTop: layout.marginTop,
+      marginBottom: layout.marginBottom,
+      marginLeft: 0,
+      marginRight: 0,
+      baseFontSize: fontSize.toDouble(),
+      fontManager: _fontManager,
+      measurer: this,
+    );
+
+    int? bgImageId;
+    int? bgExtGStateId;
+    final bgImage = section.backgroundImage;
+    if (bgImage != null) {
+      final intrinsic = ImageResolver.intrinsicSizePt(bgImage.bytes);
+      bgImageId = _writer!.addImage(
+        bytes: bgImage.bytes,
+        width: (intrinsic?.$1 ?? section.width).round(),
+        height: (intrinsic?.$2 ?? section.height).round(),
+      );
+      if (bgImage.opacity < 1.0) {
+        bgExtGStateId = _writer!.addExtGState(bgImage.opacity);
+      }
+    }
+
+    for (final pageColumns in physicalPages) {
+      const bgImageName = '/BgImg';
+      const bgGStateName = '/BgGS';
+      if (bgImageId != null) _pageImages[bgImageName] = bgImageId;
+
+      final content = _renderMultiColumnPage(
+        pageColumns,
+        layout,
+        columnEngine,
+        columnCount: section.columnCount,
+        columnSpacing: section.columnSpacing,
+        columnSeparator: section.columnSeparator,
+        header: section.header,
+        footer: section.footer,
+        backgroundColor: section.backgroundColor,
+        backgroundImage: bgImage,
+        backgroundImageXObjectName: bgImageId != null ? bgImageName : null,
+        backgroundExtGStateName: bgExtGStateId != null ? bgGStateName : null,
+      );
+
+      _pendingPages.add(_PendingPage(
+        content: content,
+        width: section.width,
+        height: section.height,
+        xObjectIds: Map.from(_pageImages),
+        extGStateIds:
+            bgExtGStateId != null ? {bgGStateName: bgExtGStateId} : null,
+        links: List.of(_pageLinks),
+      ));
+
+      _pageImages.clear();
+      _imageCount = 0;
+      _pageLinks.clear();
+    }
+  }
+
+  /// Draws one physical page of a multi-column section: background/header/
+  /// footer at full page width (via [layout]), then each column's nodes
+  /// flowed independently top-to-bottom within its own x-offset, measured/
+  /// wrapped against [columnEngine] (whose content width is one column's).
+  String _renderMultiColumnPage(
+    List<List<DocxNode>> columns,
+    PdfLayoutEngine layout,
+    PdfLayoutEngine columnEngine, {
+    required int columnCount,
+    required double columnSpacing,
+    required bool columnSeparator,
+    DocxNode? header,
+    DocxNode? footer,
+    DocxColor? backgroundColor,
+    DocxBackgroundImage? backgroundImage,
+    String? backgroundImageXObjectName,
+    String? backgroundExtGStateName,
+  }) {
+    final builder = PdfContentBuilder(fontManager: _fontManager);
+
+    _renderSectionBackground(
+      builder,
+      layout,
+      backgroundColor,
+      backgroundImage,
+      backgroundImageXObjectName,
+      backgroundExtGStateName,
+    );
+
+    if (header is DocxHeader) {
+      var headerY = layout.pageHeight - 36;
+      for (final block in header.children) {
+        headerY =
+            _renderNode(block, builder, layout.marginLeft, headerY, layout);
+      }
+    }
+
+    if (footer is DocxFooter) {
+      var footerY = 36.0;
+      for (final block in footer.children) {
+        footerY =
+            _renderNode(block, builder, layout.marginLeft, footerY, layout);
+      }
+    }
+
+    for (var col = 0; col < columns.length; col++) {
+      final x = layout.marginLeft +
+          layout.columnOffsetX(col, columnCount, columnSpacing);
+      var cursorY = layout.contentTop;
+      for (final node in columns[col]) {
+        cursorY = _renderNode(node, builder, x, cursorY, columnEngine);
+      }
+
+      if (columnSeparator && col > 0) {
+        final sepX = x - columnSpacing / 2;
+        builder.saveState();
+        builder.setStrokeColorHex('#808080');
+        builder.drawLine(sepX, layout.contentBottom, sepX, layout.contentTop);
+        builder.restoreState();
+      }
+    }
+
+    return builder.content;
   }
 
   /// Renders the footnotes referenced on this page at the bottom of the
@@ -2228,6 +2381,9 @@ class _SectionData {
   final DocxNode? footer;
   final DocxColor? backgroundColor;
   final DocxBackgroundImage? backgroundImage;
+  final int columnCount;
+  final double columnSpacing;
+  final bool columnSeparator;
 
   _SectionData({
     required this.width,
@@ -2241,6 +2397,9 @@ class _SectionData {
     this.footer,
     this.backgroundColor,
     this.backgroundImage,
+    this.columnCount = 1,
+    this.columnSpacing = 36.0,
+    this.columnSeparator = false,
   });
 
   factory _SectionData.fromDef(DocxSectionDef def, List<DocxNode> nodes) {
@@ -2256,6 +2415,9 @@ class _SectionData {
       footer: def.footer,
       backgroundColor: def.backgroundColor,
       backgroundImage: def.backgroundImage,
+      columnCount: def.columnCount,
+      columnSpacing: def.columnSpacing / 20.0,
+      columnSeparator: def.columnSeparator,
     );
   }
 }

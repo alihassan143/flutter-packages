@@ -190,6 +190,13 @@ class DocxDocumentGenerator {
               builder.attribute('w:footer', '720');
             },
           );
+          if (section.columnCount > 1) {
+            builder.element('w:cols', nest: () {
+              builder.attribute('w:num', section.columnCount.toString());
+              builder.attribute('w:space', section.columnSpacing.toString());
+              if (section.columnSeparator) builder.attribute('w:sep', '1');
+            });
+          }
         } else {
           // Default page size (Letter)
           builder.element(

@@ -69,6 +69,7 @@ A **developer-first DOCX generation library** for Dart. Create, parse, read, and
 | Section background color/image (stretch/fit/center/tile, opacity) | ✅ | ✅ |
 | Multiple sections (independent page size/orientation/margins) | ✅ | ✅ |
 | Section break type (continuous/nextPage/evenPage/oddPage) | ✅ | N/A (PDF has no section-break concept) |
+| Multi-column sections (`w:cols`), equal-width only | ✅ | ✅ flows column 1 top-to-bottom before column 2, etc.; footnotes in a multi-column section aren't reserved space (known gap) |
 | Drop caps | ✅ (true Word text-wrap) | ✅ true wrap-around: following text flows in a narrower column beside the letter |
 | Footnotes | ✅ | ✅ rendered at the bottom of the page; space is auto-reserved so body text can't overlap it. Font size matches body text (no automatic downscale) |
 | Endnotes | ✅ | ✅ rendered on a trailing "Endnotes" page, with a superscript reference marker at the citation point |
@@ -965,6 +966,18 @@ final doc = DocxDocumentBuilder()
   )
   .h1('Document Title')
   .p('Content...')
+  .build();
+```
+
+### Multi-Column Sections
+
+Basic equal-width columns (`w:cols`) — supported in both the DOCX writer and PDF export, which flows column 1 top-to-bottom before starting column 2:
+
+```dart
+docx()
+  .section(columnCount: 2, columnSpacing: 360) // 0.25" gutter, in twips
+  .h1('Newsletter')
+  .p('Column 1 fills first, then column 2, across as many pages as needed...')
   .build();
 ```
 
