@@ -356,8 +356,42 @@ void main() {
             DocxText('after'),
           ]))
           .build();
+      final stopwatch = Stopwatch()..start();
       final pages = _pageStreams(doc);
+      stopwatch.stop();
       expect(pages.expand(_shownStrings), containsAll(['Figure:', 'after']));
+      // Regression guard: this scenario is the exact shape that used to make
+      // pagination non-terminating. A multi-second result (even if it does
+      // eventually finish) means the fix has regressed - fail loudly instead
+      // of letting the suite silently balloon.
+      expect(stopwatch.elapsedMilliseconds, lessThan(2000),
+          reason: 'pagination of an oversized single element should be '
+              'near-instant, not multiple seconds');
+    });
+
+    test(
+        'an oversized element inside a document WITH a TOC does not pay for '
+        'pagination twice',
+        () {
+      final doc = docx()
+          .add(DocxTableOfContents(cachedContent: const []))
+          .add(DocxParagraph(children: [
+            DocxText('Figure:'),
+            DocxLineBreak(),
+            DocxInlineImage(
+                bytes: Uint8List(0), extension: 'png', width: 50, height: 900),
+            DocxLineBreak(),
+            DocxText('after'),
+          ]))
+          .build();
+      final stopwatch = Stopwatch()..start();
+      final pages = _pageStreams(doc);
+      stopwatch.stop();
+      expect(pages.expand(_shownStrings), containsAll(['Figure:', 'after']));
+      expect(stopwatch.elapsedMilliseconds, lessThan(2000),
+          reason: 'a document with a TOC still does one dry-run pagination '
+              'pass to cache heading page numbers, so this should cost '
+              'about the same as the no-TOC case above, not noticeably more');
     });
 
     test('an over-tall list item is placed alone, the rest continues', () {

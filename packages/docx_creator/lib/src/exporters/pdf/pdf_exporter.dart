@@ -139,8 +139,13 @@ class PdfExporter implements PdfBlockMeasurer {
       for (final f in doc.footnotes ?? const <DocxFootnote>[]) f.footnoteId: f,
     };
 
-    _headingPageNumbersByText =
-        _computeHeadingPageNumbers(sections, footnotesById);
+    // The dry run exists purely to cache TOC page numbers; skip it (and the
+    // extra full pagination pass it costs) for the common case of a
+    // document with no TOC field at all.
+    _headingPageNumbersByText = sections.any(
+            (s) => s.nodes.any((n) => n is DocxTableOfContents))
+        ? _computeHeadingPageNumbers(sections, footnotesById)
+        : const <String, List<int>>{};
 
     for (final section in sections) {
       _processSection(section, footnotesById);
