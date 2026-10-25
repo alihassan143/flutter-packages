@@ -1,3 +1,15 @@
+// This file fetches real PDF samples over the network on every run (see
+// `fetchInternal` below) - some are 100+ pages and take tens of seconds to
+// download and parse (one has an explicit 3-minute `Timeout` because of it).
+// That's exactly the kind of test that "gets stuck in some cases": its
+// runtime depends on network conditions and file size, not on this
+// codebase, so it doesn't belong in the default `dart test` run that CI and
+// every other test file depend on being fast and deterministic. Excluded by
+// default via dart_test.yaml; run explicitly with
+// `dart test --run-skipped --tags=network`.
+@Tags(['network'])
+library;
+
 import 'dart:io';
 import 'dart:typed_data';
 
