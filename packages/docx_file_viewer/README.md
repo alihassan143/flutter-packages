@@ -354,6 +354,31 @@ controller.getBlockText(idx);  // Get text at block index
 controller.addListener(() => print('Search updated'));
 ```
 
+## ✏️ Editor groundwork (`lib/src/editing/`)
+
+This is a read-only viewer. `lib/src/editing/` is the first-stage groundwork
+for a future `docx_file_editor` built on top of it — not an editor itself.
+It covers, for a top-level paragraph with no floating image/shape:
+
+- **Hit-testing** (`DocxHitTester.resolve`) — maps a screen position to a
+  `DocxTextPosition` (which paragraph, which character offset), using
+  `DocxNodeBound` (see below) to find the source `DocxNode` for a rendered
+  widget.
+- **Pure edit operations** (`docx_edit_ops.dart`) — `insertText`,
+  `deleteRange`, `splitParagraph` (Enter), `mergeWithPrevious` (Backspace at
+  offset 0). Each takes a `DocxBuiltDocument` and returns a new one; the AST
+  stays immutable.
+- **Undo/redo** (`DocxEditCommandStack`) — a simple whole-document history
+  stack over those operations.
+
+Not covered yet: editing inside table cells, list items, or floated
+paragraphs; selection-wide formatting commands (bold/italic toggle); IME
+composition; collaborative editing.
+
+`DocxNodeBound` (`lib/src/widgets/docx_node_bound.dart`) wraps each top-level
+block `DocxWidgetGenerator.generateWidget` renders, so `DocxNodeBound.of(context)`
+recovers the `DocxNode` a widget came from.
+
 ## 📱 Platform Support
 
 | Platform | Support |
