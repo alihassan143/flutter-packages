@@ -357,6 +357,66 @@ class PdfLayoutEngine {
     return pages;
   }
 
+  /// Paginates [nodes] into a [columnCount]-column layout (equal-width
+  /// columns separated by [columnSpacing] points), filling the left column
+  /// of a page before moving to the next column, and starting a new page
+  /// only once every column on the current one is full.
+  ///
+  /// Reuses [paginate] unmodified: runs it against a virtual zero-margin
+  /// "page" sized to one column's content width, then packs [columnCount]
+  /// of those virtual pages onto each real page - rather than threading a
+  /// variable content width through [paginate]'s already-intricate
+  /// paragraph/list/table splitting logic.
+  ///
+  /// Known gap: doesn't combine with [paginateWithFootnotes] - a
+  /// multi-column section's footnotes aren't reserved bottom-of-page space
+  /// (documented in the README rather than silently mis-measuring).
+  List<List<List<DocxNode>>> paginateColumns(
+    List<DocxNode> nodes, {
+    required int columnCount,
+    required double columnSpacing,
+  }) {
+    if (columnCount <= 1) {
+      return paginate(nodes).map((page) => [page]).toList();
+    }
+
+    final columnWidth = columnContentWidth(columnCount, columnSpacing);
+    final columnEngine = PdfLayoutEngine(
+      pageWidth: columnWidth,
+      pageHeight: pageHeight,
+      marginTop: marginTop,
+      marginBottom: marginBottom,
+      marginLeft: 0,
+      marginRight: 0,
+      baseFontSize: baseFontSize,
+      fontManager: fontManager,
+      measurer: measurer,
+    );
+
+    final virtualPages = columnEngine.paginate(nodes);
+    final physicalPages = <List<List<DocxNode>>>[];
+    for (var i = 0; i < virtualPages.length; i += columnCount) {
+      physicalPages.add(
+        virtualPages.sublist(i, math.min(i + columnCount, virtualPages.length)),
+      );
+    }
+    if (physicalPages.isEmpty) physicalPages.add([]);
+    return physicalPages;
+  }
+
+  /// Width of one column's content area (points) when the content area is
+  /// split into [columnCount] equal columns separated by [columnSpacing].
+  double columnContentWidth(int columnCount, double columnSpacing) {
+    final gaps = columnSpacing * (columnCount - 1);
+    return (contentWidth - gaps) / columnCount;
+  }
+
+  /// x-offset (from the content area's left edge) of column [index].
+  double columnOffsetX(int index, int columnCount, double columnSpacing) {
+    return index *
+        (columnContentWidth(columnCount, columnSpacing) + columnSpacing);
+  }
+
   /// Runs [paginate], then rebalances pages so bottom-of-page space is
   /// reserved for any footnotes referenced by paragraphs that landed on
   /// them. Built as a post-process over [paginate]'s output (rather than

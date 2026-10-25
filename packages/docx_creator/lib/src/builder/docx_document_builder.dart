@@ -35,6 +35,9 @@ class DocxDocumentBuilder {
     int? marginBottom,
     int? marginLeft,
     int? marginRight,
+    int columnCount = 1,
+    int columnSpacing = kDefaultColumnSpacing,
+    bool columnSeparator = false,
   }) {
     _currentSection = DocxSectionDef(
       orientation: orientation,
@@ -47,6 +50,9 @@ class DocxDocumentBuilder {
       marginBottom: marginBottom ?? kDefaultMarginBottom,
       marginLeft: marginLeft ?? kDefaultMarginLeft,
       marginRight: marginRight ?? kDefaultMarginRight,
+      columnCount: columnCount,
+      columnSpacing: columnSpacing,
+      columnSeparator: columnSeparator,
     );
     return this;
   }

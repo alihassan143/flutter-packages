@@ -29,6 +29,10 @@ const int kDefaultHeaderDistance = 720; // 0.5 inch
 /// Default footer distance from bottom edge in twips.
 const int kDefaultFooterDistance = 720; // 0.5 inch
 
+/// Default gap between text columns in twips (`w:cols w:space`), matching
+/// Word's own default. 0.5 inch.
+const int kDefaultColumnSpacing = 720;
+
 // ============================================================
 // FONT DEFAULTS
 // ============================================================

@@ -123,7 +123,7 @@ class DocxWidgetGenerator {
 
     // 2. Body
     _lastCounter = counter;
-    widgets.addAll(_generateBlockWidgets(doc.elements, counter: counter));
+    widgets.addAll(_generateBodyWidgets(doc.elements, counter, doc.section));
 
     // 3. Footnotes
     if (config.showFootnotes &&
@@ -167,6 +167,85 @@ class DocxWidgetGenerator {
     }
 
     return widgets;
+  }
+
+  /// Continuous-mode body generation, section-aware for `w:cols`.
+  ///
+  /// A `w:sectPr` inside a paragraph's `pPr` (read as [DocxSectionBreakBlock])
+  /// describes the section that *ends* there; the trailing [finalSection]
+  /// describes whatever follows the last break (or the whole document, if
+  /// there are no breaks at all). Each resulting segment is rendered as
+  /// plain flow, or - when its governing section has `columnCount > 1` - as
+  /// a basic multi-column layout (see [_buildMultiColumnSegment]).
+  ///
+  /// Known gap: paged mode ([_generatePagedWidgets]) doesn't honor
+  /// `columnCount` - its pagination estimate assumes one full-width column,
+  /// and reworking that is out of scope here (tracked in the README).
+  List<Widget> _generateBodyWidgets(
+    List<DocxNode> elements,
+    BlockIndexCounter counter,
+    DocxSectionDef? finalSection,
+  ) {
+    final widgets = <Widget>[];
+    var segment = <DocxNode>[];
+    DocxSectionDef? governingSection;
+
+    void flushSegment() {
+      if (segment.isEmpty) return;
+      final columnCount = governingSection?.columnCount ?? 1;
+      if (columnCount > 1) {
+        widgets.add(_buildMultiColumnSegment(segment, counter, columnCount));
+      } else {
+        widgets.addAll(_generateBlockWidgets(segment, counter: counter));
+      }
+      segment = [];
+    }
+
+    for (final element in elements) {
+      if (element is DocxSectionBreakBlock) {
+        governingSection = element.section;
+        flushSegment();
+        governingSection = null;
+        continue;
+      }
+      segment.add(element);
+    }
+    governingSection = finalSection;
+    flushSegment();
+    return widgets;
+  }
+
+  /// Basic equal-width multi-column rendering: the segment's widgets are
+  /// split into [columnCount] sequential chunks (column 1 gets the first
+  /// third, column 2 the next third, etc. for 3 columns) laid out side by
+  /// side - not real content-height-balanced columns like Word/PDF export
+  /// produce, just enough to visually show the right column count.
+  Widget _buildMultiColumnSegment(
+    List<DocxNode> segment,
+    BlockIndexCounter counter,
+    int columnCount,
+  ) {
+    final allWidgets = _generateBlockWidgets(segment, counter: counter);
+    if (allWidgets.isEmpty) return const SizedBox.shrink();
+
+    final perColumn = (allWidgets.length / columnCount).ceil();
+    final columns = <Widget>[];
+    for (var i = 0; i < columnCount; i++) {
+      final start = (i * perColumn).clamp(0, allWidgets.length);
+      final end = (start + perColumn).clamp(0, allWidgets.length);
+      columns.add(Expanded(
+        child: Padding(
+          padding: EdgeInsets.only(right: i < columnCount - 1 ? 16.0 : 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: allWidgets.sublist(start, end),
+          ),
+        ),
+      ));
+    }
+    return IntrinsicHeight(
+      child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: columns),
+    );
   }
 
   /// Generate widgets grouped into Pages with content-aware pagination.

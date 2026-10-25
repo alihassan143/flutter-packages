@@ -21,6 +21,9 @@ class SectionParser {
     int marginBottom = kDefaultMarginBottom;
     int marginLeft = kDefaultMarginLeft;
     int marginRight = kDefaultMarginRight;
+    int columnCount = 1;
+    int columnSpacing = kDefaultColumnSpacing;
+    bool columnSeparator = false;
     DocxHeader? header;
     DocxFooter? footer;
     DocxBackgroundImage? backgroundImage;
@@ -61,6 +64,17 @@ class SectionParser {
             int.tryParse(pgMar.getAttribute('w:right') ?? '') ?? marginRight;
       }
 
+      // Columns (equal-width only; per-column w:col overrides aren't read)
+      final cols = sectPr.getElement('w:cols');
+      if (cols != null) {
+        columnCount =
+            int.tryParse(cols.getAttribute('w:num') ?? '') ?? columnCount;
+        columnSpacing =
+            int.tryParse(cols.getAttribute('w:space') ?? '') ?? columnSpacing;
+        final sep = cols.getAttribute('w:sep');
+        columnSeparator = sep == '1' || sep == 'true' || sep == 'on';
+      }
+
       // Headers
       for (var headerRef in sectPr.findAllElements('w:headerReference')) {
         final rId = headerRef.getAttribute('r:id');
@@ -98,6 +112,9 @@ class SectionParser {
       marginBottom: marginBottom,
       marginLeft: marginLeft,
       marginRight: marginRight,
+      columnCount: columnCount,
+      columnSpacing: columnSpacing,
+      columnSeparator: columnSeparator,
       header: header,
       footer: footer,
       backgroundColor: backgroundColor,
