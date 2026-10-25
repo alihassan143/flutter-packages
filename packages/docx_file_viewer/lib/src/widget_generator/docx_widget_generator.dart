@@ -177,10 +177,8 @@ class DocxWidgetGenerator {
   /// there are no breaks at all). Each resulting segment is rendered as
   /// plain flow, or - when its governing section has `columnCount > 1` - as
   /// a basic multi-column layout (see [_buildMultiColumnSegment]).
-  ///
-  /// Known gap: paged mode ([_generatePagedWidgets]) doesn't honor
-  /// `columnCount` - its pagination estimate assumes one full-width column,
-  /// and reworking that is out of scope here (tracked in the README).
+  /// [_generatePagedWidgets] honours `columnCount` too, with its own
+  /// column-aware pagination.
   List<Widget> _generateBodyWidgets(
     List<DocxNode> elements,
     BlockIndexCounter counter,
@@ -249,9 +247,19 @@ class DocxWidgetGenerator {
   }
 
   /// Generate widgets grouped into Pages with content-aware pagination.
+  ///
+  /// Section-aware the same way [_generateBodyWidgets] (continuous mode) is:
+  /// a `DocxSectionBreakBlock` ends a segment governed by its own `.section`,
+  /// and [doc]'s trailing section governs whatever follows the last break.
+  /// A single-column segment's slots are its physical pages directly; a
+  /// multi-column segment's slots are column-width-narrow and get grouped
+  /// `columnCount` at a time into one physical page laid out as a `Row` -
+  /// mirrors `PdfLayoutEngine.paginateColumns` (docx_creator): narrower
+  /// effective width per column, a physical page advances once every column
+  /// on it is full. Still "basic" column fidelity, same bar as continuous
+  /// mode's `_buildMultiColumnSegment`: columns fill in slot order, not a
+  /// real content-height-balanced layout.
   List<Widget> _generatePagedWidgets(DocxBuiltDocument doc) {
-    final pages = <List<Widget>>[];
-    var currentPageContent = <Widget>[];
     final counter = BlockIndexCounter();
     _lastCounter = counter;
 
@@ -262,16 +270,6 @@ class DocxWidgetGenerator {
     const headerFooterEstimate = 100.0;
     final availableHeight = pageHeight - pagePadding - headerFooterEstimate;
 
-    double currentPageHeight = 0;
-
-    void startNewPage() {
-      if (currentPageContent.isNotEmpty) {
-        pages.add(List.from(currentPageContent));
-        currentPageContent.clear();
-        currentPageHeight = 0;
-      }
-    }
-
     // Pre-calculate Header widgets for the first page
     List<Widget>? firstPageHeaderWidgets;
     if (doc.section?.header != null) {
@@ -281,13 +279,117 @@ class DocxWidgetGenerator {
       );
     }
 
-    // Batch elements between page breaks, then generate widgets for each batch
+    final pages = <List<Widget>>[];
+    var segment = <DocxNode>[];
+    DocxSectionDef? governingSection;
+
+    void flushSegmentToPages() {
+      if (segment.isEmpty) return;
+      final columnCount = governingSection?.columnCount ?? 1;
+      if (columnCount > 1) {
+        final columnWidthTwips = governingSection!
+            .columnContentWidth((pageWidth * 15).round());
+        final columnWidth = columnWidthTwips / 15.0;
+        final spacingPx = governingSection.columnSpacing / 15.0;
+        final slots =
+            _paginateElements(segment, columnWidth, availableHeight, counter);
+        for (var i = 0; i < slots.length; i += columnCount) {
+          final group =
+              slots.sublist(i, (i + columnCount).clamp(0, slots.length));
+          final columns = <Widget>[
+            for (var c = 0; c < group.length; c++)
+              Expanded(
+                child: Padding(
+                  padding:
+                      EdgeInsets.only(right: c < group.length - 1 ? spacingPx : 0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: group[c],
+                  ),
+                ),
+              ),
+          ];
+          pages.add([
+            IntrinsicHeight(
+              child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: columns),
+            ),
+          ]);
+        }
+      } else {
+        pages.addAll(
+            _paginateElements(segment, pageWidth.toDouble(), availableHeight, counter));
+      }
+      segment = [];
+    }
+
+    for (final element in doc.elements) {
+      if (element is DocxSectionBreakBlock) {
+        governingSection = element.section;
+        flushSegmentToPages();
+        governingSection = null;
+        continue;
+      }
+      segment.add(element);
+    }
+    governingSection = doc.section;
+    flushSegmentToPages();
+
+    if (pages.isEmpty) {
+      pages.add([]);
+    }
+
+    return pages.asMap().entries.map((entry) {
+      final index = entry.key;
+      final content = entry.value;
+      final headerWidgets = (index == 0) ? firstPageHeaderWidgets : null;
+      return _buildPageContainer(content, doc, headerWidgets: headerWidgets);
+    }).toList();
+  }
+
+  /// Paginates [elements] into content "slots" of [slotWidth], each capped
+  /// at [availableHeight] - the batch/flush/split loop [_generatePagedWidgets]
+  /// always used, now parameterized so a multi-column section can reuse it
+  /// per-column instead of per-page (see [_generatePagedWidgets] for how
+  /// slots become physical pages).
+  ///
+  /// `DocxParagraph.keepNext` is honoured the same way
+  /// `PdfLayoutEngine.paginate` (docx_creator) does: walk the full chain of
+  /// consecutive `keepNext` paragraphs (OOXML lets it chain across any
+  /// number, not just a pair), stop at a successor with its own explicit
+  /// break (that one's starting a fresh slot regardless), and if the whole
+  /// chain doesn't fit what's left of the current slot but does fit a fresh
+  /// one, flush first so the chain lands together. Basic widow/orphan
+  /// control (don't strand a single line, approximated from fragment height
+  /// against ~1.5 line-heights) is left to [_splitParagraphToFit]'s own
+  /// word-boundary search - skipped here: a line-accurate guard needs the
+  /// line count a split produced, which this estimator doesn't track, same
+  /// documented limit as the PDF engine's own guard.
+  List<List<Widget>> _paginateElements(
+    List<DocxNode> elements,
+    double slotWidth,
+    double availableHeight,
+    BlockIndexCounter counter,
+  ) {
+    final slots = <List<Widget>>[];
+    var currentSlotContent = <Widget>[];
+    double currentSlotHeight = 0;
+
+    void startNewSlot() {
+      if (currentSlotContent.isNotEmpty) {
+        slots.add(List.from(currentSlotContent));
+        currentSlotContent.clear();
+        currentSlotHeight = 0;
+      }
+    }
+
     List<DocxNode> currentBatch = [];
 
     double estimateBatchHeight(List<DocxNode> batch) {
       double height = 0;
       for (var element in batch) {
-        height += _estimateElementHeight(element, pageWidth);
+        height += _estimateElementHeight(element, slotWidth);
       }
       return height;
     }
@@ -296,28 +398,23 @@ class DocxWidgetGenerator {
       if (currentBatch.isNotEmpty) {
         final batchHeight = estimateBatchHeight(currentBatch);
 
-        // Check if batch would overflow current page
-        if (currentPageHeight + batchHeight > availableHeight &&
-            currentPageContent.isNotEmpty) {
-          startNewPage();
+        // Check if batch would overflow current slot
+        if (currentSlotHeight + batchHeight > availableHeight &&
+            currentSlotContent.isNotEmpty) {
+          startNewSlot();
         }
 
         // Generate widgets for the batch (preserves floating element grouping)
         final widgets = _generateBlockWidgets(currentBatch, counter: counter);
-        currentPageContent.addAll(widgets);
-        currentPageHeight += batchHeight;
+        currentSlotContent.addAll(widgets);
+        currentSlotHeight += batchHeight;
         currentBatch.clear();
       }
     }
 
-    // ponytail: DocxParagraph.keepNext (docx_creator) isn't enforced here —
-    // this batching is whole-element/whole-batch height bucketing, not a
-    // line-level layout, so there's no clean place to "keep this paragraph
-    // with the next one" without the real split-aware pagination a
-    // companion PR is landing for paged mode. Wire a keepNext guard in once
-    // that lands; PdfLayoutEngine.paginate (docx_creator) already enforces
-    // it for PDF export.
-    for (var element in doc.elements) {
+    for (var idx = 0; idx < elements.length; idx++) {
+      final element = elements[idx];
+
       // Check for explicit page breaks
       bool isPageBreak = false;
       if (element is DocxSectionBreakBlock) {
@@ -326,45 +423,73 @@ class DocxWidgetGenerator {
         isPageBreak = true;
       }
 
+      if (!isPageBreak && element is DocxParagraph && element.keepNext) {
+        var chainEnd = idx;
+        while (chainEnd < elements.length &&
+            elements[chainEnd] is DocxParagraph &&
+            (elements[chainEnd] as DocxParagraph).keepNext) {
+          final next = chainEnd + 1;
+          if (next >= elements.length) break;
+          final successor = elements[next];
+          if (successor is DocxSectionBreakBlock) break;
+          if (successor is DocxParagraph && successor.pageBreakBefore) break;
+          chainEnd = next;
+        }
+        if (chainEnd > idx) {
+          var chainHeight = 0.0;
+          for (var j = idx; j <= chainEnd; j++) {
+            chainHeight += _estimateElementHeight(elements[j], slotWidth);
+          }
+          // Commit whatever's pending first so currentSlotHeight reflects
+          // reality, then decide if the chain itself needs a fresh slot.
+          flushBatch();
+          if (currentSlotHeight + chainHeight > availableHeight &&
+              chainHeight <= availableHeight &&
+              currentSlotContent.isNotEmpty) {
+            startNewSlot();
+          }
+        }
+      }
+
       if (isPageBreak) {
         flushBatch();
-        startNewPage();
+        startNewSlot();
         if (element is! DocxSectionBreakBlock) {
           currentBatch.add(element);
         }
       } else if ((element is DocxParagraph ||
               element is DocxList ||
               element is DocxTable) &&
-          _estimateElementHeight(element, pageWidth) > availableHeight) {
-        // Taller than a whole page on its own - flow it across as many
-        // pages as it needs instead of letting it overflow one page's
+          _estimateElementHeight(element, slotWidth) > availableHeight) {
+        // Taller than a whole slot on its own - flow it across as many
+        // slots as it needs instead of letting it overflow one slot's
         // Container. Bypasses the batch/flat-estimate machinery below:
         // each chunk's height comes from the splitter itself, which
         // measures the exact text it kept.
         flushBatch();
         DocxNode? remaining = element;
         while (remaining != null) {
-          if (currentPageHeight >= availableHeight &&
-              currentPageContent.isNotEmpty) {
-            startNewPage();
+          if (currentSlotHeight >= availableHeight &&
+              currentSlotContent.isNotEmpty) {
+            startNewSlot();
           }
-          final spaceLeft =
-              (availableHeight - currentPageHeight).clamp(0.0, availableHeight);
-          final split = _splitElementToFit(remaining, spaceLeft, pageWidth);
+          final spaceLeft = (availableHeight - currentSlotHeight)
+              .clamp(0.0, availableHeight);
+          final split = _splitElementToFit(remaining, spaceLeft, slotWidth);
           if (split.fitted == null) {
-            // Nothing fits even on an empty page (e.g. one line/row/item
+            // Nothing fits even on an empty slot (e.g. one line/row/item
             // taller than a page) - place it whole rather than loop
             // forever; it overflows its container same as before this change.
-            currentPageContent
+            currentSlotContent
                 .addAll(_generateBlockWidgets([remaining], counter: counter));
-            currentPageHeight = availableHeight;
+            currentSlotHeight = availableHeight;
             break;
           }
-          currentPageContent.addAll(
+          currentSlotContent.addAll(
               _generateBlockWidgets([split.fitted!], counter: counter));
-          currentPageHeight += split.fittedHeight;
+          currentSlotHeight += split.fittedHeight;
           remaining = split.remainder;
-          if (remaining != null) startNewPage();
+          if (remaining != null) startNewSlot();
         }
       } else {
         currentBatch.add(element);
@@ -384,18 +509,9 @@ class DocxWidgetGenerator {
     }
 
     flushBatch();
-    startNewPage();
+    startNewSlot();
 
-    if (pages.isEmpty) {
-      pages.add([]);
-    }
-
-    return pages.asMap().entries.map((entry) {
-      final index = entry.key;
-      final content = entry.value;
-      final headerWidgets = (index == 0) ? firstPageHeaderWidgets : null;
-      return _buildPageContainer(content, doc, headerWidgets: headerWidgets);
-    }).toList();
+    return slots;
   }
 
   /// Height of a document element for pagination.

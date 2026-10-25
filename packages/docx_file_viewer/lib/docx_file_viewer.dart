@@ -18,6 +18,8 @@ export 'src/editing/docx_edit_ops.dart';
 export 'src/editing/docx_hit_tester.dart';
 export 'src/editing/docx_paragraph_text.dart';
 export 'src/editing/docx_text_position.dart';
+export 'src/rendering/docx_paragraph_render_widget.dart';
+export 'src/rendering/render_docx_paragraph.dart';
 export 'src/search/docx_search_controller.dart';
 export 'src/theme/docx_view_theme.dart';
 export 'src/utils/block_index_counter.dart';
