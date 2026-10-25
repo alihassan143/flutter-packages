@@ -297,6 +297,37 @@ final bytes = await DocxExporter().exportToBytes(doc);
 DocxView.bytes(Uint8List.fromList(bytes))
 ```
 
+## 🏗️ Rendering architecture (groundwork for an editor)
+
+This package currently composes Flutter's own text widgets (`RichText`/
+`SelectableText.rich`) for paragraph text. That's fine for a read-only
+viewer, but it's a real obstacle to building an editor on top: those two
+widgets are backed by different render objects (`RenderParagraph` vs.
+`RenderEditable`) with incompatible APIs for the same question — "what text
+position is under this point," "where does the caret go" — so any
+hit-testing code has to branch on which one a given paragraph happens to use.
+
+`lib/src/rendering/render_docx_paragraph.dart` starts replacing that with a
+custom `RenderDocxParagraph` (a leaf `RenderBox` built directly on
+`TextPainter`, the same primitive `RenderParagraph` uses internally) exposing
+one real API — `getPositionForOffset`, `getCaretRect`,
+`getBoxesForSelection` — under our control. `ParagraphBuilder` uses it for
+the default (non-selectable) plain-text case today.
+
+**What's NOT on it yet** — these keep rendering through the existing
+Flutter-widget composition, and are the natural next steps:
+- Any paragraph row containing a `WidgetSpan` (inline image/shape/math, or a
+  first-line-indent spacer) — `RenderDocxParagraph` is a true leaf with no
+  child render objects; supporting those means becoming a multi-child render
+  object with placeholder dimensions, much closer to a full
+  `RenderParagraph` reimplementation.
+- OS-level text selection (`DocxViewConfig(enableSelection: true)`, the
+  default) still uses `SelectableText.rich` — an editor built on
+  `RenderDocxParagraph` will want to manage its own caret/selection rather
+  than the OS's, so migrating this path is deferred until that's needed.
+- Tables, lists, images, floating layouts, and drop caps — all still
+  Flutter-widget composition.
+
 ## 🔍 Search API
 
 The `DocxSearchController` provides full control over document search:
