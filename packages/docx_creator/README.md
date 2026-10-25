@@ -74,6 +74,7 @@ A **developer-first DOCX generation library** for Dart. Create, parse, read, and
 | Endnotes | ✅ | ✅ rendered on a trailing "Endnotes" page, with a superscript reference marker at the citation point |
 | Table of Contents | ✅ (live field, recalculated by Word) | ✅ titles render as static text (no live field), but page numbers are recomputed against the PDF's own pagination, not Word's stale cache |
 | Checkboxes (☐ ☑ ☒) | ✅ | ✅ |
+| Math equations (OMML, `m:oMath`) | ✅ basic — text, fractions, sub/superscripts, radicals; anything else (matrices, n-ary, accents, limits) round-trips as flattened text | ✅ same basic set gets real visual structure (fraction bar, raised superscript, radical sign); inner content of a fraction/superscript/radical renders as flattened text, not nested layout |
 | Multi-page pagination | N/A | ✅ automatic; paragraphs and tables both split cleanly across pages with no overlap; a nested list inside a table cell numbers correctly per level |
 | Long words/URLs wider than the line | N/A | ✅ split across lines like any other overflow, instead of drawing past the margin |
 | Raw/unmodeled OOXML passthrough ("Shadow Model") | ✅ | N/A (DOCX-specific fidelity feature) |
